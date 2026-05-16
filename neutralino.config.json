@@ -1,0 +1,56 @@
+{
+  "$schema": "https://raw.githubusercontent.com/neutralinojs/neutralinojs/main/schemas/neutralino.config.schema.json",
+  "applicationId": "io.tomika.vlcrec",
+  "applicationIcon": "assets/vlc-rec.png",
+  "version": "0.1.0",
+  "defaultMode": "window",
+  "port": 0,
+  "documentRoot": "/src/frontend/",
+  "url": "/",
+  "enableServer": true,
+  "enableNativeAPI": true,
+  "tokenSecurity": "one-time",
+  "logging": {
+    "enabled": true,
+    "writeToLogFile": true
+  },
+  "nativeAllowList": [
+    "app.*",
+    "os.*",
+    "filesystem.*",
+    "debug.log"
+  ],
+  "modes": {
+    "window": {
+      "title": "VLC Stream Recorder",
+      "width": 620,
+      "height": 360,
+      "minWidth": 560,
+      "minHeight": 320,
+      "center": true,
+      "fullScreen": false,
+      "alwaysOnTop": false,
+      "icon": "/assets/vlc-rec.png",
+      "enableInspector": false,
+      "openInspectorOnStartup": false,
+      "injectClientLibrary": true,
+      "borderless": false,
+      "maximize": false,
+      "hidden": false,
+      "resizable": true,
+      "exitProcessOnClose": false
+    }
+  },
+  "cli": {
+    "binaryName": "vlc-rec",
+    "resourcesPath": "/src/frontend/",
+    "extensionsPath": "/extensions/",
+    "clientLibrary": "/src/frontend/js/neutralino.js",
+    "binaryVersion": "6.7.0",
+    "clientVersion": "6.7.0",
+    "copyItems": [
+      "/assets",
+      "/vlc_rec_params.json"
+    ]
+  }
+}

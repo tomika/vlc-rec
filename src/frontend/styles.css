@@ -1,0 +1,314 @@
+:root {
+  --bg: #2c3e50;
+  --panel: #34495e;
+  --text: #ecf0f1;
+  --blue: #3498db;
+  --green: #27ae60;
+  --mid: #64748b;
+  --danger: #e74c3c;
+}
+
+* {
+  box-sizing: border-box;
+}
+
+body {
+  margin: 0;
+  font-family: "Segoe UI", Tahoma, sans-serif;
+  background: radial-gradient(1200px 500px at 10% -30%, #3c5a74 0, var(--bg) 60%);
+  color: var(--text);
+  overflow: hidden;
+}
+
+html {
+  overflow: hidden;
+}
+
+.app {
+  padding: 16px;
+}
+
+.field-label {
+  display: block;
+  font-size: 13px;
+  margin: 10px 0 6px;
+}
+
+.row {
+  display: flex;
+  gap: 8px;
+}
+
+.row .text-input {
+  flex: 1;
+}
+
+.text-input,
+.select-input {
+  width: 100%;
+  border: 1px solid #1f2d3a;
+  border-radius: 6px;
+  background: var(--panel);
+  color: var(--text);
+  padding: 8px;
+  font-size: 14px;
+}
+
+.select-input {
+  width: 84px;
+  -webkit-appearance: none;
+  -moz-appearance: none;
+  appearance: none;
+  color-scheme: dark;
+  color: #ecf0f1;
+  -webkit-text-fill-color: #ecf0f1;
+  background-color: #34495e;
+  padding-right: 28px;
+  background-image:
+    linear-gradient(45deg, transparent 50%, #ecf0f1 50%),
+    linear-gradient(135deg, #ecf0f1 50%, transparent 50%);
+  background-position:
+    calc(100% - 14px) calc(50% + 1px),
+    calc(100% - 9px) calc(50% + 1px);
+  background-size: 5px 5px, 5px 5px;
+  background-repeat: no-repeat;
+}
+
+.select-input option {
+  color: #ecf0f1;
+  background-color: #2f4256;
+}
+
+.select-input:focus {
+  outline: 2px solid #4aa3df;
+  outline-offset: 0;
+}
+
+.info-row {
+  margin-top: 12px;
+  display: flex;
+  gap: 20px;
+  font-size: 14px;
+}
+
+.button-row {
+  margin-top: 18px;
+  display: flex;
+  gap: 10px;
+}
+
+.btn {
+  border: none;
+  border-radius: 8px;
+  color: #fff;
+  padding: 10px;
+  font-weight: 600;
+  cursor: pointer;
+}
+
+.button-row .btn,
+.scan-actions .btn {
+  flex: 1;
+}
+
+.row .btn {
+  flex: 0 0 auto;
+  padding-inline: 16px;
+}
+
+.btn-inline {
+  flex: 0 0 auto;
+  padding-inline: 16px;
+}
+
+.btn:disabled {
+  opacity: 0.5;
+  cursor: not-allowed;
+}
+
+.btn-blue {
+  background: var(--blue);
+}
+
+.btn-green {
+  background: var(--green);
+}
+
+.btn-red {
+  background: var(--danger);
+}
+
+.scan-dialog {
+  position: fixed;
+  inset: 0;
+  background: rgba(9, 14, 20, 0.7);
+  display: block;
+  padding: 0;
+  z-index: 30;
+}
+
+.scan-dialog[hidden] {
+  display: none !important;
+}
+
+.scan-card {
+  width: 100vw;
+  height: 100vh;
+  max-height: none;
+  overflow: auto;
+  background: linear-gradient(180deg, #3d566e 0%, #31465b 100%);
+  border: none;
+  border-radius: 0;
+  box-shadow: none;
+  padding: 0;
+}
+
+.scan-header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  position: sticky;
+  top: 0;
+  z-index: 2;
+  min-height: 36px;
+  padding: 4px 10px;
+  background: linear-gradient(180deg, #283847 0%, #22313f 100%);
+  border-bottom: 1px solid #1a2733;
+}
+
+.scan-body {
+  padding: 10px 16px 16px;
+}
+
+.scan-card .field-label {
+  margin: 6px 0 4px;
+}
+
+.scan-title {
+  margin: 0;
+  font-size: 12px;
+  font-weight: 700;
+}
+
+.scan-close-btn {
+  flex: 0 0 auto;
+  width: 28px;
+  height: 28px;
+  border: 1px solid #4a627a;
+  border-radius: 6px;
+  background: #2e4257;
+  color: #ecf0f1;
+  font-size: 20px;
+  line-height: 20px;
+  cursor: pointer;
+}
+
+.scan-close-btn:hover {
+  background: #3a526b;
+}
+
+.scan-form-row {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+
+.scan-inline-label {
+  font-size: 13px;
+  color: #d9e1e8;
+  white-space: nowrap;
+}
+
+.scan-mask-input {
+  flex: 1;
+  min-width: 180px;
+}
+
+.scan-port-input {
+  width: 96px;
+  flex: 0 0 96px;
+}
+
+.scan-actions {
+  margin-top: 10px;
+  display: flex;
+  gap: 10px;
+}
+
+.scan-progress {
+  margin-top: 8px;
+  min-height: 20px;
+  font-size: 13px;
+  color: #d1d5db;
+}
+
+.scan-current {
+  margin-top: 4px;
+  min-height: 20px;
+  font-size: 12px;
+  color: #b8c3cf;
+  overflow-wrap: anywhere;
+}
+
+.scan-progressbar {
+  margin-top: 8px;
+  width: 100%;
+  height: 16px;
+  border-radius: 999px;
+  border: 1px solid #1f2d3a;
+  background: #223242;
+  overflow: hidden;
+}
+
+.scan-progressbar-fill {
+  height: 100%;
+  width: 0%;
+  background: linear-gradient(90deg, #2e86c1 0%, #4aa3df 100%);
+  color: #fff;
+  font-size: 11px;
+  font-weight: 700;
+  line-height: 14px;
+  text-align: center;
+  white-space: nowrap;
+  transition: width 120ms linear;
+}
+
+.scan-results {
+  width: 100%;
+  height: 86px;
+  border: 1px solid #1f2d3a;
+  border-radius: 8px;
+  background: #243546;
+  color: var(--text);
+  font-size: 14px;
+  padding: 4px;
+}
+
+.scan-results option.scan-state-untested {
+  color: #ecf0f1;
+}
+
+.scan-results option.scan-state-testing {
+  color: #f1c40f;
+}
+
+.scan-results option.scan-state-srt-found {
+  color: #2ecc71;
+}
+
+.scan-results option.scan-state-not-srt {
+  color: #e67e22;
+}
+
+.scan-results option.scan-state-unknown {
+  color: #bdc3c7;
+}
+
+.status {
+  color: var(--danger);
+  font-style: italic;
+  margin-top: 12px;
+  min-height: 20px;
+  overflow-wrap: anywhere;
+}

@@ -1,0 +1,7 @@
+node_modules
+bin
+dist
+.tmp
+src/frontend/js/neutralino.js
+src/frontend/js/neutralino.d.ts
+neutralinojs.log

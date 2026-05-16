@@ -1,0 +1,82 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>VLC Stream Recorder</title>
+  <link rel="icon" href="data:," />
+  <link rel="stylesheet" href="/styles.css" />
+</head>
+<body>
+  <main class="app">
+    <label class="field-label" for="ip">SRT Stream IP Address (e.g., 192.168.1.100:5000):</label>
+    <div class="row">
+      <input id="ip" class="text-input" type="text" />
+      <button id="scanBtn" class="btn btn-blue btn-inline" type="button">Scan</button>
+    </div>
+
+    <label class="field-label" for="outPath">Output Folder:</label>
+    <div class="row">
+      <input id="outPath" class="text-input" type="text" />
+      <button id="browseBtn" class="btn btn-blue" type="button">Browse...</button>
+    </div>
+
+    <label class="field-label" for="filename">Output Filename (e.g., 2024-07-05):</label>
+    <div class="row">
+      <input id="filename" class="text-input" type="text" />
+      <select id="extension" class="select-input" aria-label="Output file extension">
+        <option value="mkv">mkv</option>
+        <option value="mp4">mp4</option>
+      </select>
+    </div>
+
+    <div class="info-row">
+      <span id="fileSize">File Size: 0 B</span>
+      <span id="elapsed">Time Elapsed: 00:00:00</span>
+    </div>
+
+    <div class="button-row">
+      <button id="recordBtn" class="btn btn-blue" type="button">Start VLC Stream &amp; Record</button>
+      <button id="previewBtn" class="btn btn-green" type="button">Preview Only</button>
+    </div>
+
+    <div id="status" class="status"></div>
+  </main>
+
+  <div id="scanDialog" class="scan-dialog" role="dialog" aria-modal="true" aria-labelledby="scanTitle" hidden>
+    <div class="scan-card">
+      <div class="scan-header">
+        <h2 id="scanTitle" class="scan-title">Scan for SRT Hosts</h2>
+        <button id="closeScanBtn" class="scan-close-btn" type="button" aria-label="Close scan dialog">&times;</button>
+      </div>
+
+      <div class="scan-body">
+
+        <div class="scan-form-row">
+          <label class="scan-inline-label" for="scanMask">Mask</label>
+          <input id="scanMask" class="text-input scan-mask-input" type="text" placeholder="192.168.1.* or empty for local subnets" />
+
+          <label class="scan-inline-label" for="scanPort">Port</label>
+          <input id="scanPort" class="text-input scan-port-input" type="number" min="1" max="65535" step="1" placeholder="5000" />
+        </div>
+
+        <div class="scan-actions">
+          <button id="startScanBtn" class="btn btn-blue" type="button">Start Scan</button>
+          <button id="abortScanBtn" class="btn btn-red" type="button">Abort Scan</button>
+        </div>
+
+        <div id="scanProgress" class="scan-progress">Idle.</div>
+        <div id="scanCurrent" class="scan-current">Current: idle</div>
+        <div id="scanProgressBar" class="scan-progressbar" role="progressbar" aria-valuemin="0" aria-valuemax="100" aria-valuenow="0">
+          <div id="scanProgressBarFill" class="scan-progressbar-fill">0%</div>
+        </div>
+
+        <label class="field-label" for="scanResults">Found addresses</label>
+        <select id="scanResults" class="scan-results" size="3" aria-label="Found address list"></select>
+      </div>
+    </div>
+  </div>
+
+  <script src="/app.js"></script>
+</body>
+</html>
