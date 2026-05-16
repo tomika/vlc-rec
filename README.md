@@ -51,6 +51,18 @@ This runs `neu build --release --embed-resources`, which:
 
 Linux note: file managers usually show a generic icon for raw ELF binaries. Use the generated `.desktop` launcher (`linux-*/vlc-rec.desktop`) to get the custom app icon in Linux file explorers and launchers.
 
+## CI and GitHub Releases
+
+- Pull requests and pushes to `main` run CI build (`npm ci` + `npm run build`).
+- Pushing a version tag matching `v*` (for example `v0.1.0`) runs `npm run package` and publishes a GitHub Release with `vlc-rec-release.zip` and `SHA256SUMS.txt`.
+
+Release trigger example:
+
+```bash
+git tag v0.1.0
+git push origin v0.1.0
+```
+
 ## Notes
 
 - Use the **Scan** button next to the SRT input to open the scanner dialog.
