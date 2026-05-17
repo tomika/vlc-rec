@@ -800,17 +800,25 @@ async function queueResultVerification(addressPort) {
 }
 
 function buildProbeCommand(address, port) {
+  // SRT (and most VLC streaming endpoints we look for here) run over UDP, so a
+  // pure TCP probe would mark every real SRT listener as CLOSED. We probe UDP
+  // instead — false positives (firewalled hosts) are filtered by the subsequent
+  // srt-live-transmit / VLC verifier step.
   if (NL_OS === "Windows") {
-    const winScript = `$c=New-Object Net.Sockets.TcpClient;try{$a=$c.BeginConnect('${address}',${port},$null,$null);if($a.AsyncWaitHandle.WaitOne(700,$false)-and $c.Connected){$c.EndConnect($a)|Out-Null;Write-Output OPEN}else{Write-Output CLOSED}}catch{Write-Output CLOSED}finally{$c.Close()}`;
+    const winScript = `$u=New-Object Net.Sockets.UdpClient;try{$u.Client.ReceiveTimeout=700;$null=$u.Send([byte[]](0),1,'${address}',${port});try{$null=$u.Send([byte[]](0),1,'${address}',${port});Write-Output OPEN}catch{Write-Output CLOSED}}catch{Write-Output CLOSED}finally{$u.Close()}`;
     return `powershell -NoProfile -NonInteractive -Command \"${winScript}\"`;
   }
 
   if (NL_OS === "Linux") {
-    return bashInvocation(`timeout 1 bash -c '</dev/tcp/${address}/${port}' >/dev/null 2>&1 && echo OPEN || echo CLOSED`);
+    // nc -u -z sends a zero-byte UDP datagram. If the kernel returns ICMP
+    // "port unreachable", nc exits non-zero -> CLOSED. Otherwise -> OPEN
+    // (real listener OR silently dropped by firewall; verifier sorts it out).
+    const script = `if command -v nc >/dev/null 2>&1; then nc -u -z -w 1 ${address} ${port} >/dev/null 2>&1 && echo OPEN || echo CLOSED; elif command -v ncat >/dev/null 2>&1; then ncat -u -z -w 1 ${address} ${port} >/dev/null 2>&1 && echo OPEN || echo CLOSED; else echo OPEN; fi`;
+    return bashInvocation(script);
   }
 
   if (NL_OS === "Darwin") {
-    return bashInvocation(`nc -G 1 -z ${address} ${port} >/dev/null 2>&1 && echo OPEN || echo CLOSED`);
+    return bashInvocation(`nc -u -G 1 -z ${address} ${port} >/dev/null 2>&1 && echo OPEN || echo CLOSED`);
   }
 
   throw new Error(`Port scan is not supported on this OS (${NL_OS}).`);
