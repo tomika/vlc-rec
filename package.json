@@ -1,6 +1,6 @@
 {
   "name": "vlc-rec-neutralino",
-  "version": "0.1.0",
+  "version": "0.1.1",
   "private": true,
   "description": "VLC Stream Recorder ported from Python Tkinter to NeutralinoJS",
   "main": "src/frontend/app.js",

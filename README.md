@@ -67,11 +67,17 @@ git push origin v0.1.0
 
 - Use the **Scan** button next to the SRT input to open the scanner dialog.
 - Scanner supports explicit mask input (for example: `192.168.1.*`) and automatic local-network scan when mask is empty.
-- Scan runs asynchronously with concurrency 25 and can be aborted manually or by selecting a found endpoint.
-- To use simulation mode, set this in `vlc_rec_params.json`:
+- Scan runs asynchronously with configurable concurrency (default 25) and can be aborted manually or by selecting a found endpoint.
+- On Linux/macOS the app requires `bash` for VLC remote control and port scanning. It is preinstalled on virtually every desktop distribution; if it is missing or installed in a non-standard location, set `bash_path` in `vlc_rec_params.json` to the full path of the bash executable.
+- Configurable parameters in `vlc_rec_params.json`:
+  - `srt_mode`: set to `"simulation"` to run without a real VLC process.
+  - `bash_path`: path or name of the bash executable (default `"bash"`).
+  - `scan_concurrency`: number of concurrent port probes during a scan (default `25`, range 1-256).
 
 ```json
 {
-  "srt_mode": "simulation"
+  "srt_mode": "simulation",
+  "bash_path": "/usr/bin/bash",
+  "scan_concurrency": 25
 }
 ```

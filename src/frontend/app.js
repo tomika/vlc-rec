@@ -24,11 +24,15 @@ const scanResults = document.getElementById("scanResults");
 const DEFAULT_PARAMS = {
   ip_address: "127.0.0.1:5000",
   output_path: "",
-  output_filename: `${new Date().toISOString().slice(0, 10)}.mkv`
+  output_filename: `${new Date().toISOString().slice(0, 10)}.mkv`,
+  bash_path: "bash",
+  scan_concurrency: 25
 };
 
 const PARAMS_FILE = `${NL_PATH}/vlc_rec_params.json`;
-const SCAN_CONCURRENCY = 25;
+const SCAN_CONCURRENCY_DEFAULT = 25;
+const SCAN_CONCURRENCY_MIN = 1;
+const SCAN_CONCURRENCY_MAX = 256;
 const MAX_SCAN_TARGETS = 65536;
 const probeProcessHandlers = new Map();
 const VERIFY_CONCURRENCY = 3;
@@ -463,6 +467,46 @@ function shellQuote(value) {
   return `'${input.replace(/'/g, "'\\''")}'`;
 }
 
+function bashPath() {
+  const raw = String(parameters.bash_path || DEFAULT_PARAMS.bash_path || "bash").trim();
+  return raw || "bash";
+}
+
+function bashInvocation(script) {
+  return `${shellQuote(bashPath())} -c ${shellQuote(script)}`;
+}
+
+function scanConcurrency() {
+  const raw = Number(parameters.scan_concurrency);
+  if (!Number.isFinite(raw)) return SCAN_CONCURRENCY_DEFAULT;
+  const value = Math.floor(raw);
+  if (value < SCAN_CONCURRENCY_MIN) return SCAN_CONCURRENCY_MIN;
+  if (value > SCAN_CONCURRENCY_MAX) return SCAN_CONCURRENCY_MAX;
+  return value;
+}
+
+async function ensureBashAvailable() {
+  if (NL_OS === "Windows") return true;
+  try {
+    const info = await Neutralino.os.execCommand(`${shellQuote(bashPath())} -c "exit 0"`);
+    if (Number(info.exitCode) === 0) return true;
+  } catch {
+    // Fall through to warning below.
+  }
+
+  const message = `This app requires the 'bash' shell to control VLC and to scan ports on Linux/macOS. `
+    + `It could not be launched using '${bashPath()}'. `
+    + `Install bash (most distributions ship it by default) or set the 'bash_path' parameter `
+    + `in vlc_rec_params.json to the full path of the bash executable.`;
+  try {
+    await Neutralino.os.showMessageBox("VLC Stream Recorder", message, "OK", "WARNING");
+  } catch {
+    // Ignore dialog errors; the warning is best-effort.
+  }
+  logDebug(`bash not available at '${bashPath()}'.`);
+  return false;
+}
+
 function splitCsvValues(raw) {
   return String(raw || "")
     .split(/[\s,]+/)
@@ -560,14 +604,12 @@ async function detectLocalCidrs() {
   }
 
   if (NL_OS === "Linux" || NL_OS === "Darwin") {
-    const unixCmd = "bash -lc \"ip -o -f inet addr show 2>/dev/null | awk '{print $4}' | paste -sd, -\"";
-    const unixInfo = await Neutralino.os.execCommand(unixCmd);
-    const cidrs = splitCsvValues(unixInfo.stdOut).filter((entry) => /^\d{1,3}(?:\.\d{1,3}){3}\/\d{1,2}$/.test(entry));
+    const primary = await Neutralino.os.execCommand(bashInvocation("ip -o -f inet addr show 2>/dev/null | awk '{print $4}' | paste -sd, -"));
+    const cidrs = splitCsvValues(primary.stdOut).filter((entry) => /^\d{1,3}(?:\.\d{1,3}){3}\/\d{1,2}$/.test(entry));
     if (cidrs.length > 0) return cidrs;
 
-    const fallbackCmd = "bash -lc \"ifconfig 2>/dev/null | awk '/inet / && $2 != \\\"127.0.0.1\\\" {print $2\\\"/24\\\"}' | paste -sd, -\"";
-    const fallbackInfo = await Neutralino.os.execCommand(fallbackCmd);
-    return splitCsvValues(fallbackInfo.stdOut).filter((entry) => /^\d{1,3}(?:\.\d{1,3}){3}\/\d{1,2}$/.test(entry));
+    const fallback = await Neutralino.os.execCommand(bashInvocation("ifconfig 2>/dev/null | awk '/inet / && $2 != \"127.0.0.1\" {print $2\"/24\"}' | paste -sd, -"));
+    return splitCsvValues(fallback.stdOut).filter((entry) => /^\d{1,3}(?:\.\d{1,3}){3}\/\d{1,2}$/.test(entry));
   }
 
   return [];
@@ -606,7 +648,7 @@ async function commandExists(commandName) {
       return Number(info.exitCode) === 0;
     }
 
-    const info = await Neutralino.os.execCommand(`bash -lc "command -v ${commandName}"`);
+    const info = await Neutralino.os.execCommand(bashInvocation(`command -v ${commandName}`));
     return Number(info.exitCode) === 0;
   } catch {
     return false;
@@ -678,7 +720,7 @@ async function verifyWithSrtLiveTransmit(address, port) {
     return RESULT_STATE_UNKNOWN;
   }
 
-  const cmd = `bash -lc \"timeout 2 srt-live-transmit '${uri}' 'file://con' >/dev/null 2>&1; code=$?; if [ $code -eq 0 ]; then echo SRT_OK; else echo SRT_FAIL; fi\"`;
+  const cmd = bashInvocation(`timeout 2 srt-live-transmit '${uri}' 'file://con' >/dev/null 2>&1; code=$?; if [ $code -eq 0 ]; then echo SRT_OK; else echo SRT_FAIL; fi`);
   const info = await Neutralino.os.execCommand(cmd);
   const output = `${info.stdOut || ""}\n${info.stdErr || ""}`.toUpperCase();
   if (output.includes("SRT_OK")) return RESULT_STATE_FOUND;
@@ -764,11 +806,11 @@ function buildProbeCommand(address, port) {
   }
 
   if (NL_OS === "Linux") {
-    return `bash -lc \"timeout 1 bash -c '</dev/tcp/${address}/${port}' >/dev/null 2>&1 && echo OPEN || echo CLOSED\"`;
+    return bashInvocation(`timeout 1 bash -c '</dev/tcp/${address}/${port}' >/dev/null 2>&1 && echo OPEN || echo CLOSED`);
   }
 
   if (NL_OS === "Darwin") {
-    return `bash -lc \"nc -G 1 -z ${address} ${port} >/dev/null 2>&1 && echo OPEN || echo CLOSED\"`;
+    return bashInvocation(`nc -G 1 -z ${address} ${port} >/dev/null 2>&1 && echo OPEN || echo CLOSED`);
   }
 
   throw new Error(`Port scan is not supported on this OS (${NL_OS}).`);
@@ -866,6 +908,7 @@ async function startScan() {
   updateButtons();
 
   const token = scanState.token;
+  const concurrency = scanConcurrency();
 
   try {
     const resolvedHosts = await resolveScanHosts(scanMaskInput.value);
@@ -874,10 +917,10 @@ async function startScan() {
 
     scanState.total = hosts.length;
     updateScanProgressBar();
-    setScanProgress(`Scanning ${hosts.length} addresses on port ${port} with concurrency ${SCAN_CONCURRENCY}...`);
+    setScanProgress(`Scanning ${hosts.length} addresses on port ${port} with concurrency ${concurrency}...`);
 
     let nextIndex = 0;
-    const workers = Array.from({ length: Math.min(SCAN_CONCURRENCY, hosts.length) }, async () => {
+    const workers = Array.from({ length: Math.min(concurrency, hosts.length) }, async () => {
       while (!scanState.abortRequested && scanState.token === token) {
         const idx = nextIndex;
         if (idx >= hosts.length) break;
@@ -1000,7 +1043,7 @@ async function sendSoftTerminateByPid(pid) {
 
   try {
     if (NL_OS === "Linux" || NL_OS === "Darwin") {
-      await Neutralino.os.execCommand(`bash -lc "kill -TERM ${processId}"`);
+      await Neutralino.os.execCommand(bashInvocation(`kill -TERM ${processId}`));
       return true;
     }
 
@@ -1021,8 +1064,8 @@ async function sendRcShutdown(rcHost) {
 
   try {
     if (NL_OS === "Linux" || NL_OS === "Darwin") {
-      const cmd = `bash -lc "exec 3<>/dev/tcp/${target.host}/${target.port}; printf 'stop\\nshutdown\\nquit\\n' >&3; exec 3<&-; exec 3>&-"`;
-      const info = await Neutralino.os.execCommand(cmd);
+      const script = `timeout 2 bash -c 'exec 3<>/dev/tcp/${target.host}/${target.port}; printf %b "stop\\nshutdown\\nquit\\n" >&3; exec 3<&-; exec 3>&-'`;
+      const info = await Neutralino.os.execCommand(bashInvocation(script));
       return Number(info.exitCode) === 0;
     }
 
@@ -1389,6 +1432,7 @@ async function init() {
 
   await loadParams();
   await refreshState();
+  ensureBashAvailable().catch(() => {});
 
   setInterval(() => {
     refreshState().catch(() => {});
@@ -1449,6 +1493,18 @@ ip.addEventListener("input", () => {
   if (value) {
     parameters.ip_address = value;
   }
+});
+
+outPath.addEventListener("input", () => {
+  parameters.output_path = outPath.value;
+});
+
+filename.addEventListener("input", () => {
+  parameters.output_filename = currentOutputFilenameFromUI();
+});
+
+extension.addEventListener("change", () => {
+  parameters.output_filename = currentOutputFilenameFromUI();
 });
 
 scanBtn.addEventListener("click", () => {
