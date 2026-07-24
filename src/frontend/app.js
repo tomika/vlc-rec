@@ -26,7 +26,8 @@ const DEFAULT_PARAMS = {
   output_path: "",
   output_filename: `${new Date().toISOString().slice(0, 10)}.mkv`,
   bash_path: "bash",
-  scan_concurrency: 25
+  scan_concurrency: 25,
+  scan_timeout_ms: 300
 };
 
 const PARAMS_FILE = `${NL_PATH}/vlc_rec_params.json`;
@@ -35,9 +36,15 @@ const SCAN_CONCURRENCY_MIN = 1;
 const SCAN_CONCURRENCY_MAX = 256;
 const MAX_SCAN_TARGETS = 65536;
 const probeProcessHandlers = new Map();
-const VERIFY_CONCURRENCY = 3;
-const RESULT_STATE_UNTESTED = "untested";
-const RESULT_STATE_TESTING = "testing";
+// Dead hosts dominate a scan (a /24 has ~253 of them) and each costs exactly one
+// connect_timeout, so this value drives both total scan time and how fast an
+// abort drains. On a LAN the SRT handshake completes in well under 100ms.
+const SCAN_TIMEOUT_MS_DEFAULT = 300;
+const SCAN_TIMEOUT_MS_MIN = 100;
+const SCAN_TIMEOUT_MS_MAX = 5000;
+// VLC is heavy and slow (~3-6s per host); cap its concurrency well below the
+// ffprobe/ffmpeg path so a VLC-only fallback scan does not overload the machine.
+const VLC_VERIFY_CONCURRENCY_MAX = 6;
 const RESULT_STATE_FOUND = "SRT found";
 const RESULT_STATE_NOT_SRT = "not srt";
 const RESULT_STATE_UNKNOWN = "unknown";
@@ -62,8 +69,6 @@ let scanState = {
   activeHosts: new Set(),
   activeProbeIds: new Set(),
   resultOptions: new Map(),
-  verifyQueue: [],
-  verifyRunning: 0,
   verifierChecked: false,
   verifierKind: ""
 };
@@ -208,7 +213,9 @@ function updateScanCurrentInfo() {
     return;
   }
 
-  scanCurrent.textContent = `Current: ${formatIpRanges(active)}`;
+  // Keep this short: the line is a single fixed-height row, so a long list
+  // would just get clipped instead of showing the "+N more" summary.
+  scanCurrent.textContent = `Current: ${formatIpRanges(active, 2)}`;
 }
 
 function resetScanVisuals() {
@@ -318,7 +325,6 @@ function resultStateKey(state) {
 
 function resultColorForState(state) {
   if (state === RESULT_STATE_FOUND) return "#2ecc71";
-  if (state === RESULT_STATE_TESTING) return "#f1c40f";
   if (state === RESULT_STATE_NOT_SRT) return "#e67e22";
   if (state === RESULT_STATE_UNKNOWN) return "#bdc3c7";
   return "#ecf0f1";
@@ -339,10 +345,9 @@ function clearScanResults() {
   scanResults.innerHTML = "";
   scanState.found = new Set();
   scanState.resultOptions = new Map();
-  scanState.verifyQueue = [];
 }
 
-function addScanResult(addressPort) {
+function addScanResult(addressPort, state) {
   if (scanState.found.has(addressPort)) return;
   scanState.found.add(addressPort);
 
@@ -350,9 +355,7 @@ function addScanResult(addressPort) {
   option.value = addressPort;
   scanResults.appendChild(option);
   scanState.resultOptions.set(addressPort, option);
-  setResultState(addressPort, RESULT_STATE_UNTESTED);
-
-  queueResultVerification(addressPort).catch(() => {});
+  setResultState(addressPort, state || RESULT_STATE_FOUND);
 }
 
 function updateScanControls() {
@@ -393,9 +396,20 @@ function openScanDialog() {
 function requestScanAbort(message) {
   if (!scanState.running) return;
   scanState.abortRequested = true;
+
+  // Kill the probes that are still running so they stop occupying the machine,
+  // and bump the token to orphan their workers: results are discarded at the
+  // next checkpoint and startScan's finally block skips its cleanup, so the UI
+  // is released here and now rather than after the in-flight probes finish.
+  abortActiveScanProbes().catch(() => {});
+  scanState.token += 1;
+  scanState.running = false;
   scanState.activeHosts = new Set();
   updateScanCurrentInfo();
-  abortActiveScanProbes().catch(() => {});
+  updateScanProgressBar();
+  updateScanControls();
+  updateButtons();
+
   if (message) setScanProgress(message);
 }
 
@@ -482,6 +496,15 @@ function scanConcurrency() {
   const value = Math.floor(raw);
   if (value < SCAN_CONCURRENCY_MIN) return SCAN_CONCURRENCY_MIN;
   if (value > SCAN_CONCURRENCY_MAX) return SCAN_CONCURRENCY_MAX;
+  return value;
+}
+
+function scanTimeoutMs() {
+  const raw = Number(parameters.scan_timeout_ms);
+  if (!Number.isFinite(raw)) return SCAN_TIMEOUT_MS_DEFAULT;
+  const value = Math.floor(raw);
+  if (value < SCAN_TIMEOUT_MS_MIN) return SCAN_TIMEOUT_MS_MIN;
+  if (value > SCAN_TIMEOUT_MS_MAX) return SCAN_TIMEOUT_MS_MAX;
   return value;
 }
 
@@ -667,8 +690,8 @@ async function getVerifierKind() {
     return scanState.verifierKind;
   }
 
-  if (await commandExists("srt-live-transmit")) {
-    scanState.verifierKind = "srt-live-transmit";
+  if (await commandExists("ffmpeg")) {
+    scanState.verifierKind = "ffmpeg";
     return scanState.verifierKind;
   }
 
@@ -677,73 +700,100 @@ async function getVerifierKind() {
 }
 
 function buildSrtCallerUri(address, port) {
-  return `srt://${address}:${port}?mode=caller&connect_timeout=1000&latency=120`;
+  return `srt://${address}:${port}?mode=caller&connect_timeout=${scanTimeoutMs()}&latency=120`;
+}
+
+// A successful endpoint still costs ~900ms if ffprobe/ffmpeg is allowed to
+// analyse the stream at its default depth. We only need to know the handshake
+// succeeded, so cap the analysis — this roughly halves the hit case.
+const PROBE_ANALYSIS_LIMITS = "-probesize 100000 -analyzeduration 300000";
+const PROBE_OK_MARKER = "SRT_PROBE_OK";
+const VLC_PROBE_WATCHDOG_MS = 9000;
+
+// Probes deliberately use spawnProcess rather than execCommand. execCommand is
+// serviced serially by the native layer, so 25 "concurrent" probes actually ran
+// one after another (~8s per batch of 25) and every other Neutralino call --
+// including the writeFile behind selecting a result -- queued behind them.
+// spawnProcess returns immediately and reports output/exit as events, which
+// gives real concurrency and lets an abort kill probes that are still running.
+
+function probeWatchdogMs() {
+  return scanTimeoutMs() + 4000;
+}
+
+// Decide on a marker echoed by the shell instead of the process exit code, so
+// the verdict does not depend on how the exit code is surfaced per platform.
+function markerScript(commandLine) {
+  const nullDevice = NL_OS === "Windows" ? "nul" : "/dev/null";
+  return `${commandLine} >${nullDevice} 2>&1 && echo ${PROBE_OK_MARKER}`;
+}
+
+function probeShellCommand(script) {
+  // Always route through an explicit shell: the script relies on redirection
+  // and '&&', and the SRT URI contains '&'. Being explicit keeps the quoting
+  // identical no matter how spawnProcess hands the string to the OS.
+  return NL_OS === "Windows" ? `cmd /c ${script}` : bashInvocation(script);
+}
+
+async function runSrtProbe(commandLine, watchdogMs) {
+  const command = probeShellCommand(markerScript(commandLine));
+  const procInfo = await Neutralino.os.spawnProcess(command);
+  const probeId = procInfo.id;
+  scanState.activeProbeIds.add(probeId);
+
+  const output = await new Promise((resolve) => {
+    let settled = false;
+    const settle = (text) => {
+      if (settled) return;
+      settled = true;
+      clearTimeout(timer);
+      probeProcessHandlers.delete(probeId);
+      scanState.activeProbeIds.delete(probeId);
+      resolve(text);
+    };
+
+    // Backstop: a probe that never reports an exit must not stall its worker.
+    const timer = setTimeout(() => {
+      Neutralino.os.updateSpawnedProcess(probeId, "exit").catch(() => {});
+      settle("");
+    }, watchdogMs);
+
+    probeProcessHandlers.set(probeId, { output: "", settle });
+  });
+
+  return output.includes(PROBE_OK_MARKER) ? RESULT_STATE_FOUND : RESULT_STATE_NOT_SRT;
 }
 
 async function verifyWithFfprobe(address, port) {
   const uri = buildSrtCallerUri(address, port);
-  const cmd = `ffprobe -v error -show_entries format=format_name -of default=nk=1:nw=1 \"${uri}\"`;
-  const info = await Neutralino.os.execCommand(cmd);
-  const output = `${info.stdOut || ""}\n${info.stdErr || ""}`.toLowerCase();
-  if (Number(info.exitCode) === 0 && !output.includes("error") && !output.includes("failed")) {
-    return RESULT_STATE_FOUND;
-  }
-
-  if (
-    output.includes("input/output error")
-    || output.includes("connection")
-    || output.includes("failed")
-    || output.includes("refused")
-    || output.includes("timed out")
-    || output.includes("invalid")
-    || Number(info.exitCode) !== 0
-  ) {
-    return RESULT_STATE_NOT_SRT;
-  }
-
-  return RESULT_STATE_UNKNOWN;
+  return await runSrtProbe(
+    `ffprobe -v error ${PROBE_ANALYSIS_LIMITS} -show_entries format=format_name -of default=nk=1:nw=1 \"${uri}\"`,
+    probeWatchdogMs()
+  );
 }
 
-async function verifyWithSrtLiveTransmit(address, port) {
+async function verifyWithFfmpeg(address, port) {
   const uri = buildSrtCallerUri(address, port);
-
-  if (NL_OS === "Windows") {
-    const ps = [
-      "$src='" + uri + "'",
-      "$proc=Start-Process 'srt-live-transmit' -ArgumentList @($src,'file://con') -PassThru -NoNewWindow",
-      "if($proc.WaitForExit(2000)){ if($proc.ExitCode -eq 0){'SRT_OK'} else {'SRT_FAIL'} } else { $proc.Kill(); 'SRT_TIMEOUT' }"
-    ].join("; ");
-    const info = await Neutralino.os.execCommand(`powershell -NoProfile -NonInteractive -Command \"${ps}\"`);
-    const output = `${info.stdOut || ""}\n${info.stdErr || ""}`.toUpperCase();
-    if (output.includes("SRT_OK")) return RESULT_STATE_FOUND;
-    if (output.includes("SRT_FAIL") || output.includes("SRT_TIMEOUT")) return RESULT_STATE_NOT_SRT;
-    return RESULT_STATE_UNKNOWN;
-  }
-
-  const cmd = bashInvocation(`timeout 2 srt-live-transmit '${uri}' 'file://con' >/dev/null 2>&1; code=$?; if [ $code -eq 0 ]; then echo SRT_OK; else echo SRT_FAIL; fi`);
-  const info = await Neutralino.os.execCommand(cmd);
-  const output = `${info.stdOut || ""}\n${info.stdErr || ""}`.toUpperCase();
-  if (output.includes("SRT_OK")) return RESULT_STATE_FOUND;
-  if (output.includes("SRT_FAIL") || output.includes("SRT_TIMEOUT") || Number(info.exitCode) !== 0) {
-    return RESULT_STATE_NOT_SRT;
-  }
-  return RESULT_STATE_UNKNOWN;
+  // connect_timeout in the SRT URI bounds this on every OS (it is a libsrt
+  // option, not a shell feature), so no external timeout wrapper is required.
+  // -t 0.5 stops reading a successful stream quickly so ffmpeg exits cleanly.
+  return await runSrtProbe(
+    `ffmpeg -hide_banner -loglevel error ${PROBE_ANALYSIS_LIMITS} -i \"${uri}\" -t 0.5 -f null -`,
+    probeWatchdogMs()
+  );
 }
 
 async function verifyWithVlc(address, port) {
   const uri = buildSrtCallerUri(address, port);
-  const cmd = `vlc --intf dummy --play-and-exit --run-time=2 \"${uri}\" vlc://quit`;
-  const info = await Neutralino.os.execCommand(cmd);
-  const output = `${info.stdOut || ""}\n${info.stdErr || ""}`.toLowerCase();
-  if (Number(info.exitCode) === 0 && !output.includes("error") && !output.includes("failed")) {
-    return RESULT_STATE_FOUND;
-  }
+  const vlc = `vlc --intf dummy --play-and-exit --run-time=2 \"${uri}\" vlc://quit`;
 
-  if (output.includes("error") || output.includes("failed") || Number(info.exitCode) !== 0) {
-    return RESULT_STATE_NOT_SRT;
-  }
-
-  return RESULT_STATE_UNKNOWN;
+  // VLC has no SRT connect-timeout: on an unreachable host it retries forever
+  // and never reaches --run-time, so it must be killed from outside. On unix
+  // `timeout` also reaps the VLC child; on Windows the watchdog kill covers it.
+  return await runSrtProbe(
+    NL_OS === "Windows" ? vlc : `timeout 6 ${vlc}`,
+    VLC_PROBE_WATCHDOG_MS
+  );
 }
 
 async function verifySrtEndpoint(addressPort) {
@@ -759,69 +809,14 @@ async function verifySrtEndpoint(addressPort) {
       return await verifyWithFfprobe(parsed.host, parsed.port);
     }
 
-    if (verifier === "srt-live-transmit") {
-      return await verifyWithSrtLiveTransmit(parsed.host, parsed.port);
+    if (verifier === "ffmpeg") {
+      return await verifyWithFfmpeg(parsed.host, parsed.port);
     }
 
     return await verifyWithVlc(parsed.host, parsed.port);
   } catch {
     return RESULT_STATE_UNKNOWN;
   }
-}
-
-async function pumpVerificationQueue() {
-  while (scanState.verifyRunning < VERIFY_CONCURRENCY && scanState.verifyQueue.length > 0) {
-    const addressPort = scanState.verifyQueue.shift();
-    if (!addressPort) return;
-
-    scanState.verifyRunning += 1;
-    (async () => {
-      const verifyState = await verifySrtEndpoint(addressPort);
-      setResultState(addressPort, verifyState);
-    })()
-      .catch(() => {
-        setResultState(addressPort, RESULT_STATE_UNKNOWN);
-      })
-      .finally(() => {
-        scanState.verifyRunning = Math.max(0, scanState.verifyRunning - 1);
-        pumpVerificationQueue().catch(() => {});
-      });
-  }
-}
-
-async function queueResultVerification(addressPort) {
-  const option = scanState.resultOptions.get(addressPort);
-  if (!option) return;
-
-  if (option.dataset.state !== RESULT_STATE_UNTESTED) return;
-  setResultState(addressPort, RESULT_STATE_TESTING);
-  scanState.verifyQueue.push(addressPort);
-  await pumpVerificationQueue();
-}
-
-function buildProbeCommand(address, port) {
-  // SRT (and most VLC streaming endpoints we look for here) run over UDP, so a
-  // pure TCP probe would mark every real SRT listener as CLOSED. We probe UDP
-  // instead — false positives (firewalled hosts) are filtered by the subsequent
-  // srt-live-transmit / VLC verifier step.
-  if (NL_OS === "Windows") {
-    const winScript = `$u=New-Object Net.Sockets.UdpClient;try{$u.Client.ReceiveTimeout=700;$null=$u.Send([byte[]](0),1,'${address}',${port});try{$null=$u.Send([byte[]](0),1,'${address}',${port});Write-Output OPEN}catch{Write-Output CLOSED}}catch{Write-Output CLOSED}finally{$u.Close()}`;
-    return `powershell -NoProfile -NonInteractive -Command \"${winScript}\"`;
-  }
-
-  if (NL_OS === "Linux") {
-    // nc -u -z sends a zero-byte UDP datagram. If the kernel returns ICMP
-    // "port unreachable", nc exits non-zero -> CLOSED. Otherwise -> OPEN
-    // (real listener OR silently dropped by firewall; verifier sorts it out).
-    const script = `if command -v nc >/dev/null 2>&1; then nc -u -z -w 1 ${address} ${port} >/dev/null 2>&1 && echo OPEN || echo CLOSED; elif command -v ncat >/dev/null 2>&1; then ncat -u -z -w 1 ${address} ${port} >/dev/null 2>&1 && echo OPEN || echo CLOSED; else echo OPEN; fi`;
-    return bashInvocation(script);
-  }
-
-  if (NL_OS === "Darwin") {
-    return bashInvocation(`nc -u -G 1 -z ${address} ${port} >/dev/null 2>&1 && echo OPEN || echo CLOSED`);
-  }
-
-  throw new Error(`Port scan is not supported on this OS (${NL_OS}).`);
 }
 
 function handleProbeSpawnedProcessEvent(evt) {
@@ -836,10 +831,7 @@ function handleProbeSpawnedProcessEvent(evt) {
   }
 
   if (action === "exit") {
-    const isOpen = /\bOPEN\b/i.test(handler.output);
-    probeProcessHandlers.delete(id);
-    scanState.activeProbeIds.delete(id);
-    handler.resolve(isOpen);
+    handler.settle(handler.output);
   }
 }
 
@@ -850,35 +842,6 @@ async function abortActiveScanProbes() {
   await Promise.all(
     probeIds.map((probeId) => Neutralino.os.updateSpawnedProcess(probeId, "exit").catch(() => {}))
   );
-}
-
-async function probePortOpen(address, port, token) {
-  if (token !== scanState.token || scanState.abortRequested) {
-    return false;
-  }
-
-  const command = buildProbeCommand(address, port);
-  const procInfo = await Neutralino.os.spawnProcess(command);
-  const probeId = procInfo.id;
-
-  if (token !== scanState.token || scanState.abortRequested) {
-    try {
-      await Neutralino.os.updateSpawnedProcess(probeId, "exit");
-    } catch {
-      // Ignore cancellation errors.
-    }
-    return false;
-  }
-
-  scanState.activeProbeIds.add(probeId);
-
-  return await new Promise((resolve) => {
-    probeProcessHandlers.set(probeId, {
-      resolve,
-      output: "",
-      token
-    });
-  });
 }
 
 async function applySelectedAddress(addressPort) {
@@ -916,16 +879,25 @@ async function startScan() {
   updateButtons();
 
   const token = scanState.token;
-  const concurrency = scanConcurrency();
 
   try {
+    const verifier = await getVerifierKind();
+    if (scanState.token !== token) return;
+    // VLC verification is heavy and slow, so throttle it much harder than the
+    // ffprobe/ffmpeg path, which is fast and bounded by the SRT connect_timeout.
+    const concurrency = verifier === "vlc"
+      ? Math.min(scanConcurrency(), VLC_VERIFY_CONCURRENCY_MAX)
+      : scanConcurrency();
+
     const resolvedHosts = await resolveScanHosts(scanMaskInput.value);
     const hosts = prioritizeHostsNearCurrent(resolvedHosts);
     if (scanState.token !== token) return;
 
     scanState.total = hosts.length;
     updateScanProgressBar();
-    setScanProgress(`Scanning ${hosts.length} addresses on port ${port} with concurrency ${concurrency}...`);
+    setScanProgress(
+      `Scanning ${hosts.length} addresses on port ${port} (concurrency ${concurrency}, timeout ${scanTimeoutMs()}ms)...`
+    );
 
     let nextIndex = 0;
     const workers = Array.from({ length: Math.min(concurrency, hosts.length) }, async () => {
@@ -935,26 +907,32 @@ async function startScan() {
         nextIndex += 1;
 
         const host = hosts[idx];
-        let isOpen = false;
+        const addressPort = `${host}:${port}`;
+        let state = RESULT_STATE_NOT_SRT;
         scanState.activeHosts.add(host);
         updateScanCurrentInfo();
         try {
-          isOpen = await probePortOpen(host, port, token);
+          // The SRT handshake IS the reachability test now — a raw UDP port
+          // probe cannot tell an open SRT listener from a silently dropped
+          // packet, which is what used to hang the scan.
+          state = await verifySrtEndpoint(addressPort);
         } catch {
-          isOpen = false;
+          state = RESULT_STATE_UNKNOWN;
         }
+        // Check the token first: an orphaned worker from an aborted scan must
+        // not touch the state of whatever scan is running now.
+        if (scanState.token !== token) return;
+
         scanState.activeHosts.delete(host);
         updateScanCurrentInfo();
 
-        if (scanState.token !== token) return;
-
         scanState.checked += 1;
         updateScanProgressBar();
-        if (isOpen) {
-          addScanResult(`${host}:${port}`);
+        if (state === RESULT_STATE_FOUND) {
+          addScanResult(addressPort, state);
         }
 
-        if (scanState.checked % 5 === 0 || isOpen || scanState.checked === scanState.total) {
+        if (scanState.checked % 5 === 0 || state === RESULT_STATE_FOUND || scanState.checked === scanState.total) {
           setScanProgress(
             `Scanning ${scanState.checked}/${scanState.total} | found ${scanState.found.size}`
           );
@@ -979,7 +957,6 @@ async function startScan() {
     if (scanState.token === token) {
       scanState.running = false;
       scanState.activeHosts = new Set();
-      scanState.activeProbeIds = new Set();
       updateScanCurrentInfo();
       updateScanProgressBar();
       updateScanControls();
@@ -1524,7 +1501,9 @@ startScanBtn.addEventListener("click", () => {
 });
 
 abortScanBtn.addEventListener("click", () => {
-  requestScanAbort("Abort requested...");
+  requestScanAbort(
+    `Scan aborted. Checked ${scanState.checked}/${scanState.total}, found ${scanState.found.size}.`
+  );
 });
 
 closeScanBtn.addEventListener("click", () => {
@@ -1537,7 +1516,7 @@ scanResults.addEventListener("change", () => {
 
   (async () => {
     if (scanState.running) {
-      requestScanAbort("Address selected. Stopping scan...");
+      requestScanAbort("Address selected. Scan stopped.");
     }
     await applySelectedAddress(selected);
     closeScanDialog();
