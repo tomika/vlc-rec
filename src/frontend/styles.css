@@ -17,11 +17,11 @@ body {
   font-family: "Segoe UI", Tahoma, sans-serif;
   background: radial-gradient(1200px 500px at 10% -30%, #3c5a74 0, var(--bg) 60%);
   color: var(--text);
-  overflow: hidden;
+  overflow: auto;
 }
 
 html {
-  overflow: hidden;
+  overflow: auto;
 }
 
 .app {
@@ -82,6 +82,20 @@ html {
 .select-input:focus {
   outline: 2px solid #4aa3df;
   outline-offset: 0;
+}
+
+.reconnect-option {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  margin-top: 12px;
+  font-size: 13px;
+  cursor: pointer;
+}
+
+.reconnect-option input {
+  margin: 0;
+  accent-color: var(--blue);
 }
 
 .info-row {

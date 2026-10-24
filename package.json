@@ -5,6 +5,7 @@
   "description": "VLC Stream Recorder ported from Python Tkinter to NeutralinoJS",
   "main": "src/frontend/app.js",
   "scripts": {
+    "test": "node --test",
     "neu:update": "neu update",
     "start": "neu run",
     "dev": "neu run",

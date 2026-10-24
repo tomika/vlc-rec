@@ -6,6 +6,7 @@ const extension = document.getElementById("extension");
 const browseBtn = document.getElementById("browseBtn");
 const recordBtn = document.getElementById("recordBtn");
 const previewBtn = document.getElementById("previewBtn");
+const autoReconnect = document.getElementById("autoReconnect");
 const fileSize = document.getElementById("fileSize");
 const elapsed = document.getElementById("elapsed");
 const status = document.getElementById("status");
@@ -27,7 +28,9 @@ const DEFAULT_PARAMS = {
   output_filename: `${new Date().toISOString().slice(0, 10)}.mkv`,
   bash_path: "bash",
   scan_concurrency: 25,
-  scan_timeout_ms: 300
+  scan_timeout_ms: 300,
+  auto_reconnect: false,
+  stall_timeout_sec: 15
 };
 
 const PARAMS_FILE = `${NL_PATH}/vlc_rec_params.json`;
@@ -48,6 +51,11 @@ const VLC_VERIFY_CONCURRENCY_MAX = 6;
 const RESULT_STATE_FOUND = "SRT found";
 const RESULT_STATE_NOT_SRT = "not srt";
 const RESULT_STATE_UNKNOWN = "unknown";
+const RECONNECT_RETRY_MS = 5000;
+const PREVIEW_CHECK_MS = 5000;
+const RECORDING_CADENCE_SAMPLES = 8;
+const RECORDING_CADENCE_MIN_SAMPLES = 3;
+const RECORDING_STALL_MIN_MS = 3000;
 
 let parameters = { ...DEFAULT_PARAMS };
 let mode = "idle";
@@ -59,6 +67,9 @@ let operationToken = 0;
 let simSizeBytes = 1024;
 let simLastTickSec = 0;
 let uiBusy = false;
+let activeSession = null;
+let monitorBusy = false;
+let closeRequested = false;
 let scanState = {
   running: false,
   abortRequested: false,
@@ -464,6 +475,7 @@ async function saveParams(ipAddress, outputPathValue, outputFilename) {
 }
 
 function resetState(newStatus = "Stopped.") {
+  activeSession = null;
   mode = "idle";
   currentProcess = null;
   startTimeMs = 0;
@@ -1077,6 +1089,54 @@ async function sendRcShutdown(rcHost) {
   return false;
 }
 
+async function readPreviewProgress(rcHost) {
+  const target = parseRcHostPort(rcHost);
+  if (!target || target.host !== "127.0.0.1") throw new Error("VLC RC is unavailable.");
+
+  let command;
+  if (NL_OS === "Windows") {
+    // Encode the script so PowerShell variables survive native command parsing.
+    // Both connect and reads are bounded; a stuck RC must not block recovery.
+    const script = [
+      "$ErrorActionPreference='Stop'",
+      "$c=New-Object Net.Sockets.TcpClient",
+      "try {",
+      `$task=$c.ConnectAsync('${target.host}',${target.port})`,
+      "if (-not $task.Wait(800)) { throw 'RC connect timed out' }",
+      "$s=$c.GetStream()",
+      "$s.ReadTimeout=800; $s.WriteTimeout=800",
+      "$bytes=[Text.Encoding]::ASCII.GetBytes(\"stats`n\")",
+      "$s.Write($bytes,0,$bytes.Length)",
+      "$buf=New-Object byte[] 4096; $text=''",
+      "$until=[DateTime]::UtcNow.AddMilliseconds(1600)",
+      "while ([DateTime]::UtcNow -lt $until) {",
+      "try { $n=$s.Read($buf,0,$buf.Length) } catch { break }",
+      "if ($n -eq 0) { break }",
+      "$text += [Text.Encoding]::UTF8.GetString($buf,0,$n)",
+      "if ($text.Contains('end of statistical info')) { break }",
+      "}",
+      "[Console]::Write($text)",
+      "} finally { $c.Dispose() }"
+    ].join("\n");
+    const encoded = btoa(Array.from(script, (ch) => `${ch}\0`).join(""));
+    command = `powershell -NoProfile -NonInteractive -EncodedCommand ${encoded}`;
+  } else {
+    const script = `exec 3<>/dev/tcp/${target.host}/${target.port} || exit 1; `
+      + `printf 'stats\\n' >&3; deadline=$((SECONDS+2)); `
+      + `while (( SECONDS < deadline )) && IFS= read -r -t 1 line <&3; do `
+      + `printf '%s\\n' "$line"; case "$line" in *'end of statistical info'*) break;; esac; done`;
+    command = bashInvocation(script);
+  }
+
+  const info = await Neutralino.os.execCommand(command);
+  if (Number(info.exitCode) !== 0) throw new Error("Could not read VLC statistics.");
+  // The first KiB counter is input bytes, in both VLC's native and Lua RC.
+  // Match the unit instead of the label to also accept translated native RC.
+  const match = String(info.stdOut || "").match(/:\s*(\d+(?:[.,]\d+)?)\s*KiB\b/i);
+  if (!match) return null;
+  return Number(match[1].replace(",", "."));
+}
+
 async function stopVlcGracefully(proc, options = {}) {
   if (!proc || proc.type !== "real") return;
   const procId = proc.id;
@@ -1103,6 +1163,21 @@ async function stopVlcGracefully(proc, options = {}) {
   }
 
   logDebug(`Stopping VLC (pid=${proc.pid || "n/a"}) using ${softStopIssued ? "soft-stop" : "forced-stop"} strategy.`);
+
+  if (options.waitForExit) {
+    // Reconnect only after the old process releases the SRT connection and file.
+    // Automatic recovery must never wait for a modal force-stop warning.
+    for (let attempt = 0; attempt < 13; attempt += 1) {
+      if (!await isSpawnedProcessAlive(procId)) return;
+      await new Promise((resolve) => setTimeout(resolve, 200));
+    }
+    await Neutralino.os.updateSpawnedProcess(procId, "exit");
+    for (let attempt = 0; attempt < 10; attempt += 1) {
+      if (!await isSpawnedProcessAlive(procId)) return;
+      await new Promise((resolve) => setTimeout(resolve, 200));
+    }
+    throw new Error("VLC has not stopped yet.");
+  }
 
   const warningText = wasRecording
     ? "VLC is still recording. If the app force-stops VLC, mp4 finalization may fail and the file can become corrupted or unusable. For safest results, stop VLC manually in the VLC window when possible."
@@ -1182,7 +1257,157 @@ async function currentState() {
   };
 }
 
-async function startOperation({ record, ipAddress, outputPathValue, filenameBase, ext }) {
+function stallTimeoutMs() {
+  const seconds = Number(parameters.stall_timeout_sec);
+  return (Number.isFinite(seconds) && seconds >= 5 ? seconds : DEFAULT_PARAMS.stall_timeout_sec) * 1000;
+}
+
+function recordingStallTimeoutMs(session) {
+  const ceiling = stallTimeoutMs();
+  if (session.growthIntervalsMs.length < RECORDING_CADENCE_MIN_SAMPLES) return ceiling;
+  // Use the longest recent write interval so buffered/bursty writes do not
+  // make a single short interval trigger premature reconnects. The monitor
+  // samples once a second, so three seconds is the shortest useful timeout.
+  const cadence = Math.max(...session.growthIntervalsMs);
+  return Math.min(ceiling, Math.max(RECORDING_STALL_MIN_MS, cadence * 3));
+}
+
+function resetSessionProgress(session) {
+  session.lastSize = 0;
+  session.lastProgressAt = Date.now();
+  session.lastGrowthAt = null;
+  session.growthIntervalsMs = [];
+  session.lastPreviewCheckAt = 0;
+  session.previewProgress = null;
+  session.previewUnavailable = false;
+  session.nextRetryAt = 0;
+}
+
+function createSession(request) {
+  const base = baseNameWithoutExt(request.filenameBase);
+  const suffix = base.match(/_(\d+)$/);
+  const session = {
+    request: { ...request },
+    filenameRoot: suffix ? base.slice(0, -suffix[0].length) : base,
+    nextSuffix: suffix ? BigInt(suffix[1]) + 1n : 1n
+  };
+  resetSessionProgress(session);
+  return session;
+}
+
+async function nextReconnectFilename(session) {
+  while (true) {
+    const base = `${session.filenameRoot}_${String(session.nextSuffix++).padStart(3, "0")}`;
+    const name = `${base}.${session.request.ext}`;
+    const path = session.request.outputPathValue
+      ? await Neutralino.filesystem.getJoinedPath(session.request.outputPathValue, name)
+      : name;
+    if (!await pathExists(path)) return base;
+  }
+}
+
+async function reconnectSession(session, reason) {
+  if (activeSession !== session || !parameters.auto_reconnect || uiBusy) return;
+  await withBusy(async () => {
+    statusText = `${reason} Reconnecting VLC...`;
+    setStatus(statusText);
+    logDebug(statusText);
+    try {
+      const proc = currentProcess;
+      // Ignore late events from the old VLC while it finalizes its file.
+      operationToken += 1;
+      if (proc && !proc.exited) {
+        await stopVlcGracefully(proc, { wasRecording: session.request.record, waitForExit: true });
+      }
+      currentProcess = null;
+      if (closeRequested) return;
+      const request = { ...session.request };
+      if (request.record) request.filenameBase = await nextReconnectFilename(session);
+      if (closeRequested) return;
+      const result = await startOperation({ ...request, recoverySession: session });
+      if (!result.ok) throw new Error(result.error);
+      statusText = `Automatically reconnected. ${statusText}`;
+    } catch (err) {
+      // Keep the user's operation active and retry without any modal dialogs.
+      session.nextRetryAt = Date.now() + RECONNECT_RETRY_MS;
+      statusText = `Reconnect failed: ${normalizeError(err)} Retrying in 5 seconds.`;
+      logDebug(statusText);
+    }
+    await refreshState();
+  });
+}
+
+async function monitorStream() {
+  if (monitorBusy || uiBusy || closeRequested || !parameters.auto_reconnect || !activeSession || isSimulationMode()) return;
+  monitorBusy = true;
+  try {
+    const session = activeSession;
+    const proc = currentProcess;
+    if (session.nextRetryAt) {
+      if (Date.now() >= session.nextRetryAt) await reconnectSession(session, "Stream interrupted.");
+      return;
+    }
+    if (!proc || proc.exited) return;
+
+    let progress = null;
+    if (session.request.record) {
+      try {
+        const stats = await Neutralino.filesystem.getStats(outputFile);
+        progress = Number(stats.size || 0);
+      } catch {
+        // A missing/unreadable output also counts as no recording progress.
+      }
+    } else {
+      if (Date.now() - session.lastPreviewCheckAt < PREVIEW_CHECK_MS) return;
+      session.lastPreviewCheckAt = Date.now();
+      try {
+        progress = await readPreviewProgress(proc.rcHost);
+      } catch {
+        // RC availability is best-effort; do not restart solely because an
+        // installed VLC version has never supplied usable preview statistics.
+      }
+    }
+
+    // Stop, operation switches and checkbox changes can happen during a read.
+    if (activeSession !== session || currentProcess !== proc || uiBusy || !parameters.auto_reconnect) return;
+    const now = Date.now();
+    if (session.request.record) {
+      if (progress !== null && progress > session.lastSize) {
+        // The first write may just be the container header. Measure complete
+        // intervals between later growth events, excluding startup latency.
+        if (session.lastGrowthAt !== null && now > session.lastGrowthAt) {
+          session.growthIntervalsMs.push(now - session.lastGrowthAt);
+          if (session.growthIntervalsMs.length > RECORDING_CADENCE_SAMPLES) session.growthIntervalsMs.shift();
+        }
+        session.lastGrowthAt = now;
+        session.lastSize = progress;
+        session.lastProgressAt = now;
+      }
+    } else if (progress !== null) {
+      if (session.previewProgress === null || progress !== session.previewProgress) session.lastProgressAt = now;
+      session.previewProgress = progress;
+      if (session.previewUnavailable) {
+        session.previewUnavailable = false;
+        statusText = "Preview monitoring available.";
+      }
+    } else if (session.previewProgress === null) {
+      if (now - session.lastProgressAt >= stallTimeoutMs() && !session.previewUnavailable) {
+        session.previewUnavailable = true;
+        statusText = "Preview monitoring unavailable: VLC RC statistics could not be read. Process exits are still monitored.";
+      }
+      return;
+    }
+
+    const timeout = session.request.record ? recordingStallTimeoutMs(session) : stallTimeoutMs();
+    if (now - session.lastProgressAt >= timeout) {
+      await reconnectSession(session, session.request.record ? "Recording stopped growing." : "Preview stopped receiving data.");
+    }
+  } finally {
+    monitorBusy = false;
+  }
+}
+
+async function startOperation({ record, ipAddress, outputPathValue, filenameBase, ext, recoverySession = null }) {
   if (!ipAddress) {
     return { ok: false, error: "Please enter the SRT Stream IP Address." };
   }
@@ -1203,7 +1428,7 @@ async function startOperation({ record, ipAddress, outputPathValue, filenameBase
     return { ok: false, error: `The file '${fullOutput}' already exists.` };
   }
 
-  if (mode !== "idle") {
+  if (mode !== "idle" && !recoverySession) {
     await terminateCurrent("Switching operation...");
   }
 
@@ -1216,14 +1441,12 @@ async function startOperation({ record, ipAddress, outputPathValue, filenameBase
       streamUri = buildPlaybackUri(ipAddress);
     } catch (err) {
       const message = normalizeError(err);
-      resetState(message);
+      if (!recoverySession) resetState(message);
       return { ok: false, error: message };
     }
   }
 
-  const args = [
-    streamUri
-  ];
+  const args = ["--no-one-instance", "--stats", streamUri];
 
   let rcHost = "";
   if (!simMode && (NL_OS === "Linux" || NL_OS === "Darwin" || NL_OS === "Windows")) {
@@ -1271,11 +1494,13 @@ async function startOperation({ record, ipAddress, outputPathValue, filenameBase
   } catch (err) {
     const message = friendlySpawnError(err);
     logDebug(`Failed to spawn VLC: ${message}`);
-    resetState(message);
+    if (!recoverySession) resetState(message);
     return { ok: false, error: message };
   }
 
   mode = record ? "recording" : "preview";
+  activeSession = recoverySession || createSession({ record, ipAddress, outputPathValue, filenameBase: outputFilename, ext });
+  resetSessionProgress(activeSession);
   startTimeMs = Date.now();
   outputFile = record ? fullOutput : "";
   statusText = simMode
@@ -1320,6 +1545,7 @@ function updateButtons() {
   previewBtn.disabled = locked || basePreviewDisabled;
   browseBtn.disabled = locked;
   scanBtn.disabled = uiBusy || scanState.running;
+  autoReconnect.disabled = uiBusy;
 }
 
 function applyState(state) {
@@ -1327,6 +1553,7 @@ function applyState(state) {
   fileSize.textContent = `File Size: ${state.fileSize || "0 B"}`;
   elapsed.textContent = `Time Elapsed: ${state.elapsed || "00:00:00"}`;
   setStatus(state.status || "");
+  autoReconnect.checked = Boolean(parameters.auto_reconnect);
 
   if (state.fields && scanDialog.hidden) {
     if (document.activeElement !== ip) ip.value = state.fields.ip_address || "";
@@ -1339,7 +1566,11 @@ function applyState(state) {
 }
 
 async function refreshState() {
+  const token = operationToken;
+  const session = activeSession;
+  const proc = currentProcess;
   const state = await currentState();
+  if (token !== operationToken || session !== activeSession || proc !== currentProcess) return;
   applyState(state);
 }
 
@@ -1350,6 +1581,10 @@ async function withBusy(fn) {
     await fn();
   } finally {
     setBusy(false);
+    if (closeRequested) {
+      await terminateCurrent("Stopped.");
+      await Neutralino.app.exit();
+    }
   }
 }
 
@@ -1377,6 +1612,14 @@ async function handleSpawnedProcessEvent(evt) {
   }
 
   if (detail.action === "exit" && mode !== "idle") {
+    currentProcess.exited = true;
+    if (parameters.auto_reconnect && activeSession) {
+      activeSession.nextRetryAt = Date.now() + RECONNECT_RETRY_MS;
+      statusText = "VLC exited. Automatically reconnecting in 5 seconds...";
+      logDebug(`VLC exited; reconnect scheduled. ${currentProcess.output || ""}`);
+      await refreshState();
+      return;
+    }
     const output = String(currentProcess.output || "").trim();
     if (output) {
       const lines = output
@@ -1407,12 +1650,8 @@ async function init() {
   });
 
   Neutralino.events.on("windowClose", () => {
-    withBusy(async () => {
-      if (mode !== "idle") {
-        await terminateCurrent("Stopped.");
-      }
-      await Neutralino.app.exit();
-    }).catch(() => {});
+    closeRequested = true;
+    withBusy(async () => {}).catch(() => {});
   });
 
   await loadParams();
@@ -1420,9 +1659,29 @@ async function init() {
   ensureBashAvailable().catch(() => {});
 
   setInterval(() => {
-    refreshState().catch(() => {});
+    (async () => {
+      await monitorStream();
+      await refreshState();
+    })().catch((err) => logDebug(`Stream monitor: ${normalizeError(err)}`));
   }, 1000);
 }
+
+autoReconnect.addEventListener("change", () => {
+  parameters.auto_reconnect = autoReconnect.checked;
+  if (activeSession) {
+    if (!parameters.auto_reconnect && (!currentProcess || currentProcess.exited)) {
+      resetState("Automatic reconnect disabled. Stopped.");
+    } else {
+      resetSessionProgress(activeSession);
+    }
+  }
+  saveParams(parameters.ip_address, parameters.output_path, parameters.output_filename)
+    .catch((err) => {
+      statusText = `Could not save automatic reconnect setting: ${normalizeError(err)}`;
+      setStatus(statusText);
+    });
+  refreshState().catch(() => {});
+});
 
 recordBtn.addEventListener("click", () => {
   withBusy(async () => {
@@ -1464,6 +1723,7 @@ browseBtn.addEventListener("click", () => {
       });
       if (selected) {
         outPath.value = selected;
+        parameters.output_path = selected;
       }
     } catch (err) {
       if (!isCanceledDialogError(err)) {

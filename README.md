@@ -10,6 +10,7 @@ This is a NeutralinoJS port of the Python VLC Stream Recorder app.
 - Simulation mode via `srt_mode: "simulation"` in params file
 - File size + elapsed time updates every second
 - Button state/label transitions for preview and recording
+- Optional automatic VLC reconnect after a stream stall, with a new numbered recording file
 - Scan dialog for discovering reachable `IP:port` endpoints on local networks
 
 ## Requirements
@@ -65,6 +66,11 @@ git push origin v0.1.0
 
 ## Notes
 
+- Enable **Automatically reconnect if the stream stalls** to restart VLC when the recording file stops growing. At startup the app measures the intervals between file growth events. After three complete intervals, the timeout becomes three times the longest of the last eight intervals, with a 3-second minimum and a default 15-second maximum. For example, regular growth every second gives a 3-second timeout; every 2 seconds gives 6 seconds. Until enough samples exist (including an empty or missing file at startup), the timeout remains 15 seconds. Learning continues during recording and resets for every new segment or checkbox change. The checkbox is saved in `vlc_rec_params.json` and is off by default.
+- Automatic recording restarts use incrementing suffixes (`name_001.mkv`, `name_002.mkv`, etc.), skipping existing files. An initial name such as `name_007.mkv` continues at `name_008.mkv`. Recovery retains the original stream address, folder and format even if the input fields are edited during recording.
+- Preview monitoring checks VLC's RC input-byte counter every 5 seconds. If VLC provides no usable statistics, the status reports that preview stall detection is unavailable. Unexpected VLC process exits are also recovered in either mode. [VLC RC statistics implementation](https://github.com/videolan/vlc/blob/3.0.x/modules/control/oldrc.c).
+- Failed reconnects and unexpected process exits retry after 5 seconds. Stop Recording / Stop Preview, closing the app, or disabling the checkbox cancels pending retries. Recovery waits for the previous VLC to exit before opening the next connection; each successful restart resets the displayed file size and elapsed time for the new segment.
+- Recovery tries to stop VLC gracefully before forcing it to exit. MKV is preferable for interrupted streams: an MP4 segment may be unusable if VLC cannot finalize it.
 - Use the **Scan** button next to the SRT input to open the scanner dialog.
 - Scanner supports explicit mask input (for example: `192.168.1.*`) and automatic local-network scan when mask is empty.
 - Scan runs asynchronously with configurable concurrency (default 25) and can be aborted manually or by selecting a found endpoint. Aborting is immediate.
@@ -73,6 +79,8 @@ git push origin v0.1.0
 - On Linux/macOS the app requires `bash` for VLC remote control and for the VLC scan fallback. It is preinstalled on virtually every desktop distribution; if it is missing or installed in a non-standard location, set `bash_path` in `vlc_rec_params.json` to the full path of the bash executable.
 - Configurable parameters in `vlc_rec_params.json`:
   - `srt_mode`: set to `"simulation"` to run without a real VLC process.
+  - `auto_reconnect`: saved checkbox state (default `false`). Simulation mode does not run stall detection.
+  - `stall_timeout_sec`: upper limit and startup fallback for the adaptive recording timeout, and fixed timeout for preview input progress (default `15`, minimum `5`). Allow enough time for normal stream buffering.
   - `bash_path`: path or name of the bash executable (default `"bash"`).
   - `scan_concurrency`: number of concurrent endpoint probes during a scan (default `25`, range 1-256).
   - `scan_timeout_ms`: SRT connect timeout per address during a scan (default `300`, range 100-5000). Dead hosts cost exactly this much each, so it drives both total scan time and how fast an abort completes. Raise it only if the scan misses a known endpoint on a slow or wireless network.
