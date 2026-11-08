@@ -1,0 +1,74 @@
+#!/bin/sh
+# Entry point of the AppImage. Bundled programs find their libraries through RUNPATH, so
+# LD_LIBRARY_PATH stays unset and host tools called by the app (bash, ip, ffprobe) keep working.
+HERE=${APPDIR:-$(dirname "$(readlink -f "$0")")}
+USR=$HERE/usr
+PLAYER=$USR/player/vlc-rec-player-linux_x64
+DATA_DIR=${XDG_CONFIG_HOME:-$HOME/.config}/vlc-rec
+
+# The bundled libraries were built for this version, and older systems fail with a cryptic error.
+NEEDED_GLIBC=2.36
+HOST_GLIBC=$(getconf GNU_LIBC_VERSION 2>/dev/null | cut -d' ' -f2)
+if [ -n "$HOST_GLIBC" ] && [ "$(printf '%s\n%s\n' "$NEEDED_GLIBC" "$HOST_GLIBC" | sort -V | head -n 1)" != "$NEEDED_GLIBC" ]; then
+  echo "VLC Stream Recorder needs glibc $NEEDED_GLIBC or newer (Debian 12, Ubuntu 24.04), and this system has $HOST_GLIBC." >&2
+  echo "Use vlc-rec-linux-x64.tar.gz with VLC installed from your distribution instead." >&2
+  exit 1
+fi
+
+mkdir -p "$DATA_DIR" || exit 1
+
+export VLC_REC_PLAYER_DIR=$USR/player
+export VLC_REC_LIBVLC_DIR=$USR/lib
+export VLC_PLUGIN_PATH=$USR/lib/vlc/plugins
+# The port scan calls vlc, and the file and message dialogs call zenity.
+export PATH=$USR/bin:$PATH
+
+# Embedded video needs an X11 window; on Wayland sessions this selects XWayland.
+export GDK_BACKEND=${GDK_BACKEND:-x11,wayland}
+export WEBKIT_DISABLE_DMABUF_RENDERER=${WEBKIT_DISABLE_DMABUF_RENDERER:-1}
+# The UI needs no GPU, and this avoids mixing the bundled WebKit with the host's EGL drivers.
+export WEBKIT_DISABLE_COMPOSITING_MODE=${WEBKIT_DISABLE_COMPOSITING_MODE:-1}
+
+# Keep host modules built against other library versions out of the bundled GTK, GIO and GStreamer.
+export GTK_EXE_PREFIX=$USR
+export GTK_DATA_PREFIX=$USR
+export GTK_PATH=$USR/lib/gtk-3.0
+export GTK_IM_MODULE_FILE=$USR/lib/gtk-3.0/immodules.cache
+export GDK_PIXBUF_MODULE_FILE=$USR/lib/gdk-pixbuf-loaders.cache
+export GIO_MODULE_DIR=$USR/lib/gio/modules
+export GSETTINGS_SCHEMA_DIR=$USR/share/glib-2.0/schemas
+export GST_PLUGIN_SYSTEM_PATH_1_0=$USR/lib/gstreamer-1.0
+export GST_PLUGIN_PATH_1_0=$USR/lib/gstreamer-1.0
+export XDG_DATA_DIRS=$USR/share:${XDG_DATA_DIRS:-/usr/local/share:/usr/share}
+unset GTK_MODULES
+
+# WebKit and the pixbuf loaders are found relative to this folder, see build-appimage.sh.
+cd "$USR" || exit 1
+
+case " $* " in
+  *" --path="*) ;;
+  *) set -- "--path=$DATA_DIR" "$@" ;;
+esac
+
+"$USR/bin/vlc-rec" "$@" &
+APP_PID=$!
+trap 'kill -TERM "$APP_PID" 2>/dev/null' TERM INT HUP
+while kill -0 "$APP_PID" 2>/dev/null; do
+  wait "$APP_PID"
+  STATUS=$?
+done
+
+# After an app crash the player still finalizes its file, and the image is unmounted when this
+# script ends. Removing the mount under a running player would crash it and lose the file end.
+player_running() {
+  for exe in /proc/[0-9]*/exe; do
+    [ "$(readlink "$exe" 2>/dev/null)" = "$PLAYER" ] && return 0
+  done
+  return 1
+}
+WAITED=0
+while [ "$WAITED" -lt 30 ] && player_running; do
+  sleep 1
+  WAITED=$((WAITED + 1))
+done
+exit "$STATUS"

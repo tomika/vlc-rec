@@ -16,6 +16,7 @@ This is a NeutralinoJS port of the Python VLC Stream Recorder app.
 
 ## Requirements
 
+- Linux x64 AppImage: no VLC needed, see [Linux AppImage](#linux-appimage). Everything below applies to the other packages.
 - VLC 3 installed. On Debian and Ubuntu also install `vlc-plugin-access-extra`, which provides SRT.
 - Snap and Flatpak installations of VLC do not expose libVLC to the embedded player.
 - On platforms without a player binary (macOS, Linux on ARM), VLC in `PATH`; VLC then opens its own window.
@@ -46,6 +47,7 @@ npm test                 # unit tests
 npm run test:e2e         # real app window with a libVLC stub, this OS
 npm run test:e2e:real    # real app window with VLC 3 and ffmpeg, this OS
 npm run test:e2e:linux   # Linux stub, X11 and Wayland runs in a container
+npm run test:e2e:appimage # the built AppImage on several distributions, needs podman
 ```
 
 The end-to-end tests open a window that stays on top for a few minutes. Screenshots go to `e2e-output/`.
@@ -68,6 +70,24 @@ This runs `neu build --release --embed-resources`, which:
   - `vlc-rec.png` icon
 
 Linux note: file managers usually show a generic icon for raw ELF binaries. Use the generated `.desktop` launcher (`linux-*/vlc-rec.desktop`) to get the custom app icon in Linux file explorers and launchers.
+
+## Linux AppImage
+
+```bash
+npm run package:appimage   # creates dist/vlc-rec-x86_64.AppImage, needs podman or docker
+```
+
+One file of about 130 MB that contains the app, libVLC with SRT support and WebKitGTK. To run it:
+
+```bash
+chmod +x vlc-rec-x86_64.AppImage
+./vlc-rec-x86_64.AppImage
+```
+
+- It needs glibc 2.36 or newer (Debian 12, Ubuntu 24.04 or later), x86-64, an X11 or XWayland session and FUSE. If FUSE is missing, run it with `--appimage-extract-and-run`.
+- Settings and the log are stored in `~/.config/vlc-rec`.
+- Hardware video decoding has not been tested with the bundled libVLC, so expect software decoding.
+- The file contains third-party software under the GPL and LGPL. Their licenses and versions are inside the image, in `usr/share/doc/third-party`. Whoever distributes the file must also meet the source-code obligations of those licenses.
 
 ## CI and GitHub Releases
 

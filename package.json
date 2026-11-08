@@ -16,6 +16,8 @@
     "build": "npm run build:player && neu build",
     "package": "npm run build:player && neu build --release --embed-resources && node scripts/postpackage-linux-launchers.js",
     "package:clean": "npm run build:player && neu build --clean --release --embed-resources && node scripts/postpackage-linux-launchers.js",
+    "package:appimage": "npm run package && node scripts/build-appimage.js",
+    "test:e2e:appimage": "node tests/e2e/run-appimage.js",
     "postinstall": "neu update"
   },
   "devDependencies": {

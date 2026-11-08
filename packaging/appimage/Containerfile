@@ -1,0 +1,12 @@
+# Debian 12 sets the oldest supported host: the AppImage needs glibc 2.36 or newer.
+# Its VLC 3 still receives security updates, unlike the VLC in Ubuntu 22.04.
+FROM docker.io/library/debian:bookworm-slim
+RUN apt-get update && apt-get install -y --no-install-recommends \
+    libwebkit2gtk-4.0-37 libgtk-3-0 libxtst6 libxrandr2 libpng16-16 \
+    librsvg2-common gsettings-desktop-schemas libglib2.0-bin zenity \
+    vlc-bin vlc-plugin-base vlc-plugin-video-output vlc-plugin-access-extra \
+    patchelf squashfs-tools curl ca-certificates \
+    && rm -rf /var/lib/apt/lists/*
+# The AppImage runtime, pinned to one release and verified by its checksum.
+RUN curl -fsSL -o /opt/runtime-x86_64 https://github.com/AppImage/type2-runtime/releases/download/20251108/runtime-x86_64 \
+    && echo "2fca8b443c92510f1483a883f60061ad09b46b978b2631c807cd873a47ec260d  /opt/runtime-x86_64" | sha256sum -c -
