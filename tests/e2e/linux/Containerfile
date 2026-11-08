@@ -1,0 +1,12 @@
+# Linux test environment: real VLC 3, a real SRT source, virtual X11 and Wayland displays.
+FROM docker.io/library/node:22-bookworm
+RUN apt-get update && apt-get install -y --no-install-recommends \
+    vlc-bin vlc-plugin-base vlc-plugin-video-output vlc-plugin-access-extra \
+    ffmpeg xvfb x11-utils imagemagick openbox xauth dbus-x11 procps \
+    libwebkit2gtk-4.0-37 libwebkit2gtk-4.1-0 libgtk-3-0 \
+    gstreamer1.0-plugins-base gstreamer1.0-plugins-good gstreamer1.0-libav \
+    sway grim xwayland fonts-dejavu-core \
+    && rm -rf /var/lib/apt/lists/*
+RUN useradd -m tester
+USER tester
+WORKDIR /home/tester

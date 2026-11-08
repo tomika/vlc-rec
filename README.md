@@ -39,6 +39,17 @@ npm run build:player   # builds player/ and the test stub in a container
 npm run build
 ```
 
+## Tests
+
+```bash
+npm test                 # unit tests
+npm run test:e2e         # real app window with a libVLC stub, this OS
+npm run test:e2e:real    # real app window with VLC 3 and ffmpeg, this OS
+npm run test:e2e:linux   # Linux stub, X11 and Wayland runs in a container
+```
+
+The end-to-end tests open a window that stays on top for a few minutes. Screenshots go to `e2e-output/`.
+
 This creates distributable binaries in `dist/vlc-rec`.
 
 ## Package Standalone (Windows + Linux)
