@@ -19,10 +19,14 @@
  * stdout, one JSON object per line:
  *   {"event":"started","libvlc":"3.0.24"}
  *   {"event":"stats","state":3,"readBytes":123}
+ *   {"event":"video","width":1920,"height":1080,"sarNum":1,"sarDen":1}
  *   {"event":"error","code":"...","message":"..."}
  *   {"event":"stopped"}
  *
  * readBytes is a 32-bit libVLC counter and can wrap: compare it for equality only.
+ * "video" is sent when the size of the first video track becomes known or changes.
+ * Width and height are already swapped for rotated video; the display aspect ratio
+ * is width * sarNum / (height * sarDen).
  *
  * Environment: VLC_REC_LIBVLC_DIR selects the only folder libVLC is loaded from.
  */
@@ -72,6 +76,35 @@ typedef struct {
 
 enum { VLC_STATE_ENDED = 6, VLC_STATE_ERROR = 7 };
 
+/* libvlc_video_track_t; only the leading fields are read. */
+typedef struct {
+    unsigned i_height;
+    unsigned i_width;
+    unsigned i_sar_num;
+    unsigned i_sar_den;
+    unsigned i_frame_rate_num;
+    unsigned i_frame_rate_den;
+    int i_orientation;
+} vlc_video_track_t;
+
+/* libvlc_media_track_t */
+typedef struct {
+    unsigned int i_codec;
+    unsigned int i_original_fourcc;
+    int i_id;
+    int i_type;
+    int i_profile;
+    int i_level;
+    void *details; /* union of the audio, video and subtitle track pointers */
+    unsigned int i_bitrate;
+    char *psz_language;
+    char *psz_description;
+} vlc_media_track_t;
+
+enum { VLC_TRACK_VIDEO = 1 };
+/* libvlc_video_orient_t values from left_top on swap width and height. */
+enum { VLC_ORIENT_TRANSPOSED_FIRST = 4, VLC_ORIENT_TRANSPOSED_LAST = 7 };
+
 static struct {
     libvlc_instance_t *(*new_instance)(int, const char *const *);
     void (*release)(libvlc_instance_t *);
@@ -80,6 +113,8 @@ static struct {
     libvlc_media_t *(*media_new_location)(libvlc_instance_t *, const char *);
     void (*media_add_option)(libvlc_media_t *, const char *);
     int (*media_get_stats)(libvlc_media_t *, vlc_stats_t *);
+    unsigned (*media_tracks_get)(libvlc_media_t *, vlc_media_track_t ***);
+    void (*media_tracks_release)(vlc_media_track_t **, unsigned);
     void (*media_release)(libvlc_media_t *);
     libvlc_media_player_t *(*player_new_from_media)(libvlc_media_t *);
     void (*player_release)(libvlc_media_player_t *);
@@ -271,6 +306,8 @@ static int bind_libvlc(lib_t lib)
     BIND(media_new_location, "libvlc_media_new_location");
     BIND(media_add_option, "libvlc_media_add_option");
     BIND(media_get_stats, "libvlc_media_get_stats");
+    BIND(media_tracks_get, "libvlc_media_tracks_get");
+    BIND(media_tracks_release, "libvlc_media_tracks_release");
     BIND(media_release, "libvlc_media_release");
     BIND(player_new_from_media, "libvlc_media_player_new_from_media");
     BIND(player_release, "libvlc_media_player_release");
@@ -500,6 +537,35 @@ static char *build_sout(void)
     return sout;
 }
 
+/* The size appears once the decoder or packetizer has parsed the stream headers,
+ * in preview and in recording alike, so it is polled together with the stats. */
+static void report_video_size(libvlc_media_t *media, unsigned last[4])
+{
+    vlc_media_track_t **tracks = NULL;
+    unsigned count = vlc.media_tracks_get(media, &tracks);
+    unsigned size[4] = {0, 0, 1, 1};
+    for (unsigned i = 0; i < count; i++) {
+        const vlc_video_track_t *video = tracks[i]->details;
+        if (tracks[i]->i_type != VLC_TRACK_VIDEO || !video || !video->i_width || !video->i_height) continue;
+        int transposed = video->i_orientation >= VLC_ORIENT_TRANSPOSED_FIRST &&
+                         video->i_orientation <= VLC_ORIENT_TRANSPOSED_LAST;
+        size[0] = transposed ? video->i_height : video->i_width;
+        size[1] = transposed ? video->i_width : video->i_height;
+        if (video->i_sar_num && video->i_sar_den) {
+            size[2] = transposed ? video->i_sar_den : video->i_sar_num;
+            size[3] = transposed ? video->i_sar_num : video->i_sar_den;
+        }
+        break;
+    }
+    if (count) vlc.media_tracks_release(tracks, count);
+    if (!size[0] || memcmp(size, last, sizeof size) == 0) return;
+    memcpy(last, size, sizeof size);
+    char line[160];
+    snprintf(line, sizeof line, "{\"event\":\"video\",\"width\":%u,\"height\":%u,\"sarNum\":%u,\"sarDen\":%u}",
+             size[0], size[1], size[2], size[3]);
+    emit_raw(line);
+}
+
 /* Runs on its own thread: libVLC calls can block, and on Windows a blocked
  * window thread would freeze the parent process through the shared input queue. */
 static int run_player(void)
@@ -552,8 +618,12 @@ static int run_player(void)
     }
 
     int exit_code = 0;
+    unsigned video_size[4] = {0, 0, 0, 0};
     for (int tick = 0; !g_stop; tick++) {
         sleep_ms(200);
+        /* For the first 10 s, until the size is known, it is polled every tick so the
+         * layout settles quickly; a stream without video size falls back to once a second. */
+        if ((!video_size[0] && tick < 50) || tick % 5 == 4) report_video_size(media, video_size);
         if (tick % 5 != 4) continue;
         if (!parent_alive()) break;
         int state = vlc.player_get_state(player);

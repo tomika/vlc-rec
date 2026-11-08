@@ -77,6 +77,65 @@ API int libvlc_media_get_stats(void *m, stats_t *s)
     }
     return 1;
 }
+/* Video size for libvlc_media_tracks_get: "width height sarNum sarDen orientation",
+ * read on every call from the file named by LIBVLC_STUB_VIDEO_FILE, so a test can
+ * change it while the player runs. Without the file the size is 1280x720. */
+typedef struct {
+    unsigned height, width, sar_num, sar_den, rate_num, rate_den;
+    int orientation;
+} video_track_t;
+
+typedef struct {
+    unsigned codec, original_fourcc;
+    int id, type, profile, level;
+    video_track_t *video;
+    unsigned bitrate;
+    char *language, *description;
+} media_track_t;
+
+static int g_track_calls = 0;
+
+API unsigned libvlc_media_tracks_get(void *m, media_track_t ***out)
+{
+    unsigned w = 1280, h = 720, sn = 1, sd = 1;
+    int orientation = 0;
+    const char *file = getenv("LIBVLC_STUB_VIDEO_FILE");
+    (void)m;
+    *out = NULL;
+    /* Like real libVLC, no size is known before the stream headers are parsed. */
+    if (g_track_calls++ == 0) return 0;
+    if (file) {
+        FILE *f = fopen(file, "r");
+        if (f) {
+            if (fscanf(f, "%u %u %u %u %d", &w, &h, &sn, &sd, &orientation) < 2) w = h = 0;
+            fclose(f);
+        }
+    }
+    if (!w || !h) return 0;
+    media_track_t **tracks = calloc(1, sizeof *tracks);
+    media_track_t *track = calloc(1, sizeof *track);
+    video_track_t *video = calloc(1, sizeof *video);
+    video->width = w;
+    video->height = h;
+    video->sar_num = sn;
+    video->sar_den = sd;
+    video->orientation = orientation;
+    track->type = 1;
+    track->video = video;
+    tracks[0] = track;
+    *out = tracks;
+    return 1;
+}
+
+API void libvlc_media_tracks_release(media_track_t **tracks, unsigned count)
+{
+    for (unsigned i = 0; i < count; i++) {
+        free(tracks[i]->video);
+        free(tracks[i]);
+    }
+    free(tracks);
+}
+
 API void libvlc_media_release(void *m) { (void)m; }
 API void *libvlc_media_player_new_from_media(void *m) { (void)m; return &g_token; }
 API void libvlc_media_player_release(void *p) { (void)p; }
