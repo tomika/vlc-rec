@@ -31,15 +31,19 @@ jobs:
       - name: Install dependencies
         run: npm ci
 
+      - name: Unit tests
+        run: npm test
+
       - name: Build app
         run: npm run build
 
-      - name: Upload build artifact
-        uses: actions/upload-artifact@v4
-        with:
-          name: dist-vlc-rec
-          path: dist/vlc-rec
-          if-no-files-found: error
+      # Commented out to save storage: nothing downloads this artifact.
+      # - name: Upload build artifact
+      #   uses: actions/upload-artifact@v4
+      #   with:
+      #     name: dist-vlc-rec
+      #     path: dist/vlc-rec
+      #     if-no-files-found: error
 
   release:
     name: Build and Publish Release
@@ -63,24 +67,43 @@ jobs:
       - name: Build release packages
         run: npm run package
 
+      # vlc-rec-mac_universal already contains both of these.
+      - name: Remove duplicate macOS binaries
+        run: zip -d dist/vlc-rec-release.zip vlc-rec-mac_x64 vlc-rec-mac_arm64
+
+      - name: Create Linux archive
+        shell: bash
+        run: tar -czf dist/vlc-rec-linux-x64.tar.gz -C dist/vlc-rec linux-x64
+
+      # The AppImage is off because it takes too much CI storage. To turn it back on,
+      # restore this step and add the file to the checksums and the release files below.
+      # - name: Build AppImage
+      #   run: node scripts/build-appimage.js
+
       - name: Generate release checksums
         shell: bash
+        # AppImage: dist/vlc-rec-x86_64.AppImage goes before the ">".
         run: |
-          sha256sum dist/vlc-rec-release.zip > SHA256SUMS.txt
+          sha256sum dist/vlc-rec-release.zip dist/vlc-rec-linux-x64.tar.gz > SHA256SUMS.txt
 
-      - name: Upload release assets artifact
-        uses: actions/upload-artifact@v4
-        with:
-          name: release-assets
-          path: |
-            dist/vlc-rec-release.zip
-            SHA256SUMS.txt
-          if-no-files-found: error
+      # Commented out to save storage: the release below publishes the same files.
+      # - name: Upload release assets artifact
+      #   uses: actions/upload-artifact@v4
+      #   with:
+      #     name: release-assets
+      #     path: |
+      #       dist/vlc-rec-release.zip
+      #       dist/vlc-rec-linux-x64.tar.gz
+      #       SHA256SUMS.txt
+      #     if-no-files-found: error
 
       - name: Publish GitHub release
         uses: softprops/action-gh-release@v2
         with:
           generate_release_notes: true
+          # A comment inside the "|" block would become part of the list, so this one stays outside.
+          # AppImage: dist/vlc-rec-x86_64.AppImage
           files: |
             dist/vlc-rec-release.zip
+            dist/vlc-rec-linux-x64.tar.gz
             SHA256SUMS.txt

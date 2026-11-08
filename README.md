@@ -92,7 +92,9 @@ chmod +x vlc-rec-x86_64.AppImage
 ## CI and GitHub Releases
 
 - Pull requests and pushes to `main` run CI build (`npm ci` + `npm run build`).
-- Pushing a version tag matching `v*` (for example `v0.1.0`) runs `npm run package` and publishes a GitHub Release with `vlc-rec-release.zip` and `SHA256SUMS.txt`.
+- Pushing a version tag matching `v*` (for example `v0.1.0`) runs `npm run package` and publishes a GitHub Release with `vlc-rec-release.zip`, `vlc-rec-linux-x64.tar.gz` and `SHA256SUMS.txt`.
+- The AppImage is not built in CI because of its size, so build it locally with `npm run package:appimage`. The step is commented out in `.github/workflows/ci-release.yml`.
+- To save storage, CI uploads no separate build artifacts, and the release zip has one macOS binary, `vlc-rec-mac_universal`, which runs on both Intel and Apple Silicon.
 
 Release trigger example:
 
