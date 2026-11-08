@@ -21,6 +21,7 @@ const scanCurrent = document.getElementById("scanCurrent");
 const scanProgressBar = document.getElementById("scanProgressBar");
 const scanProgressBarFill = document.getElementById("scanProgressBarFill");
 const scanResults = document.getElementById("scanResults");
+const videoHost = document.getElementById("videoHost");
 
 const DEFAULT_PARAMS = {
   ip_address: "127.0.0.1:5000",
@@ -56,6 +57,8 @@ const PREVIEW_CHECK_MS = 5000;
 const RECORDING_CADENCE_SAMPLES = 8;
 const RECORDING_CADENCE_MIN_SAMPLES = 3;
 const RECORDING_STALL_MIN_MS = 3000;
+// The player finalizes the output file while stopping; large MP4 files need time.
+const PLAYER_STOP_GRACE_MS = 10000;
 
 let parameters = { ...DEFAULT_PARAMS };
 let mode = "idle";
@@ -396,6 +399,7 @@ function openScanDialog() {
   }
 
   scanDialog.hidden = false;
+  sendPlayerCommand("HIDE");
   setScanProgress("Configure IP mask and port, then click Start Scan.");
   resetScanVisuals();
   updateScanControls();
@@ -431,6 +435,7 @@ function closeScanDialog() {
   setScanProgress("Idle.");
   resetScanVisuals();
   scanDialog.hidden = true;
+  sendPlayerCommand("SHOW");
 }
 
 async function showError(text) {
@@ -977,6 +982,58 @@ async function startScan() {
   }
 }
 
+function utf8Hex(text) {
+  return Array.from(new TextEncoder().encode(String(text)), (byte) => byte.toString(16).padStart(2, "0")).join("");
+}
+
+// Returns "" when this platform or architecture has no player; the app then
+// starts VLC as an external program, as it does on macOS.
+async function findPlayerBinary() {
+  const platform = NL_OS === "Windows" ? "win" : NL_OS === "Linux" ? "linux" : "";
+  if (!platform) return "";
+  // The AppImage keeps the player in its read-only image, and NL_PATH is the settings folder there.
+  const playerDir = await Neutralino.os.getEnv("VLC_REC_PLAYER_DIR") || `${NL_PATH}/player`;
+  const path = `${playerDir}/vlc-rec-player-${platform}_${NL_ARCH}${NL_OS === "Windows" ? ".exe" : ""}`;
+  return await pathExists(path) ? path : "";
+}
+
+function videoRectArg() {
+  const rect = videoHost.getBoundingClientRect();
+  const scale = window.devicePixelRatio || 1;
+  return [rect.left, rect.top, rect.width, rect.height].map((value) => Math.round(value * scale)).join(",");
+}
+
+function buildPlayerCommand(playerPath, streamUri, record, ext, fullOutput) {
+  const args = ["--parent-pid", String(NL_PID), "--url-hex", utf8Hex(streamUri), "--rect", videoRectArg()];
+  if (record) args.push("--record-hex", utf8Hex(fullOutput), "--mux", ext === "mp4" ? "mp4" : "mkv");
+  return buildCommand(playerPath, args);
+}
+
+function sendPlayerCommand(line) {
+  const proc = currentProcess;
+  if (!proc || !proc.player || proc.exited) return;
+  Neutralino.os.updateSpawnedProcess(proc.id, "stdIn", `${line}\n`).catch(() => {});
+}
+
+function handlePlayerOutput(proc, chunk) {
+  proc.lineBuffer += chunk;
+  const lines = proc.lineBuffer.split("\n");
+  proc.lineBuffer = lines.pop();
+  for (const line of lines) {
+    let message;
+    try {
+      message = JSON.parse(line);
+    } catch {
+      continue;
+    }
+    if (message.event === "stats") proc.readBytes = message.readBytes;
+    if (message.event === "error") {
+      proc.errorMessage = String(message.message || "");
+      logDebug(`Player error ${message.code}: ${proc.errorMessage}`);
+    }
+  }
+}
+
 function buildCommand(executable, args) {
   // Quote each argument so paths and VLC sout expressions survive shell parsing.
   const tokens = [shellQuote(executable), ...args.map((arg) => shellQuote(arg))];
@@ -1167,7 +1224,8 @@ async function stopVlcGracefully(proc, options = {}) {
   if (options.waitForExit) {
     // Reconnect only after the old process releases the SRT connection and file.
     // Automatic recovery must never wait for a modal force-stop warning.
-    for (let attempt = 0; attempt < 13; attempt += 1) {
+    const softStopAttempts = proc.player ? PLAYER_STOP_GRACE_MS / 200 : 13;
+    for (let attempt = 0; attempt < softStopAttempts; attempt += 1) {
       if (!await isSpawnedProcessAlive(procId)) return;
       await new Promise((resolve) => setTimeout(resolve, 200));
     }
@@ -1179,14 +1237,18 @@ async function stopVlcGracefully(proc, options = {}) {
     throw new Error("VLC has not stopped yet.");
   }
 
-  const warningText = wasRecording
-    ? "VLC is still recording. If the app force-stops VLC, mp4 finalization may fail and the file can become corrupted or unusable. For safest results, stop VLC manually in the VLC window when possible."
-    : "";
+  const warningText = !wasRecording
+    ? ""
+    : proc.player
+      ? "The recording is still being finalized. If the app force-stops it, the file can become corrupted or unusable."
+      : "VLC is still recording. If the app force-stops VLC, mp4 finalization may fail and the file can become corrupted or unusable. For safest results, stop VLC manually in the VLC window when possible.";
   const warningState = { shown: false };
 
   // Always keep a hard-stop fallback so we don't leak VLC processes.
-  scheduleProcessExit(procId, softStopIssued ? 2600 : 800, { warningText, warningState });
-  scheduleProcessExit(procId, softStopIssued ? 7000 : 2200, { warningText, warningState });
+  const firstExitMs = proc.player ? PLAYER_STOP_GRACE_MS : softStopIssued ? 2600 : 800;
+  const secondExitMs = proc.player ? PLAYER_STOP_GRACE_MS + 5000 : softStopIssued ? 7000 : 2200;
+  scheduleProcessExit(procId, firstExitMs, { warningText, warningState });
+  scheduleProcessExit(procId, secondExitMs, { warningText, warningState });
 }
 
 async function terminateCurrent(newStatus = "Stopped.") {
@@ -1361,7 +1423,7 @@ async function monitorStream() {
       if (Date.now() - session.lastPreviewCheckAt < PREVIEW_CHECK_MS) return;
       session.lastPreviewCheckAt = Date.now();
       try {
-        progress = await readPreviewProgress(proc.rcHost);
+        progress = proc.player ? proc.readBytes : await readPreviewProgress(proc.rcHost);
       } catch {
         // RC availability is best-effort; do not restart solely because an
         // installed VLC version has never supplied usable preview statistics.
@@ -1446,10 +1508,11 @@ async function startOperation({ record, ipAddress, outputPathValue, filenameBase
     }
   }
 
+  const playerPath = simMode ? "" : await findPlayerBinary();
   const args = ["--no-one-instance", "--stats", streamUri];
 
   let rcHost = "";
-  if (!simMode && (NL_OS === "Linux" || NL_OS === "Darwin" || NL_OS === "Windows")) {
+  if (!simMode && !playerPath && (NL_OS === "Linux" || NL_OS === "Darwin" || NL_OS === "Windows")) {
     rcHost = createRcHost();
     if (NL_OS === "Windows") {
       args.unshift("--extraintf", "rc", "--rc-host", rcHost, "--rc-quiet");
@@ -1478,7 +1541,9 @@ async function startOperation({ record, ipAddress, outputPathValue, filenameBase
         simLastTickSec = 0;
       }
     } else {
-      const command = buildCommand("vlc", args);
+      const command = playerPath
+        ? buildPlayerCommand(playerPath, streamUri, record, ext, fullOutput)
+        : buildCommand("vlc", args);
       logDebug(`Launching VLC with command: ${command}`);
       const procInfo = await Neutralino.os.spawnProcess(command);
       currentProcess = {
@@ -1488,8 +1553,14 @@ async function startOperation({ record, ipAddress, outputPathValue, filenameBase
         rcHost,
         output: "",
         command,
-        token
+        token,
+        player: Boolean(playerPath),
+        readBytes: null,
+        lineBuffer: "",
+        errorMessage: ""
       };
+      // A reconnect can start a player while the scan dialog covers the window.
+      if (!scanDialog.hidden) sendPlayerCommand("HIDE");
     }
   } catch (err) {
     const message = friendlySpawnError(err);
@@ -1605,6 +1676,10 @@ async function handleSpawnedProcessEvent(evt) {
 
   if (detail.action === "stdOut" || detail.action === "stdErr") {
     const chunk = String(detail.data || "");
+    if (currentProcess.player && detail.action === "stdOut") {
+      handlePlayerOutput(currentProcess, chunk);
+      return;
+    }
     const existing = String(currentProcess.output || "");
     const combined = `${existing}${chunk}`;
     currentProcess.output = combined.slice(-8000);
@@ -1615,12 +1690,14 @@ async function handleSpawnedProcessEvent(evt) {
     currentProcess.exited = true;
     if (parameters.auto_reconnect && activeSession) {
       activeSession.nextRetryAt = Date.now() + RECONNECT_RETRY_MS;
-      statusText = "VLC exited. Automatically reconnecting in 5 seconds...";
+      statusText = currentProcess.errorMessage
+        ? `${currentProcess.errorMessage} Automatically reconnecting in 5 seconds...`
+        : "VLC exited. Automatically reconnecting in 5 seconds...";
       logDebug(`VLC exited; reconnect scheduled. ${currentProcess.output || ""}`);
       await refreshState();
       return;
     }
-    const output = String(currentProcess.output || "").trim();
+    const output = String(currentProcess.errorMessage || currentProcess.output || "").trim();
     if (output) {
       const lines = output
         .split(/\r?\n/)
@@ -1657,6 +1734,12 @@ async function init() {
   await loadParams();
   await refreshState();
   ensureBashAvailable().catch(() => {});
+  videoHost.hidden = !await findPlayerBinary();
+
+  const syncPlayerRect = () => sendPlayerCommand(`RECT ${videoRectArg()}`);
+  new ResizeObserver(syncPlayerRect).observe(videoHost);
+  window.addEventListener("resize", syncPlayerRect);
+  window.addEventListener("scroll", syncPlayerRect, true);
 
   setInterval(() => {
     (async () => {

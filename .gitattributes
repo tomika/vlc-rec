@@ -1,0 +1,5 @@
+# These files run inside Linux containers even when checked out on Windows.
+*.sh text eol=lf
+*.c text eol=lf
+Containerfile text eol=lf
+AppRun text eol=lf

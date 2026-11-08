@@ -23,10 +23,10 @@
   "modes": {
     "window": {
       "title": "VLC Stream Recorder",
-      "width": 620,
-      "height": 400,
-      "minWidth": 560,
-      "minHeight": 320,
+      "width": 1100,
+      "height": 460,
+      "minWidth": 800,
+      "minHeight": 420,
       "center": true,
       "fullScreen": false,
       "alwaysOnTop": false,
@@ -50,6 +50,7 @@
     "clientVersion": "6.7.0",
     "copyItems": [
       "/assets",
+      "/player",
       "/vlc_rec_params.json"
     ]
   }

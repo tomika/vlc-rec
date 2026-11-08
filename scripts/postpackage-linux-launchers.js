@@ -26,6 +26,9 @@ function launcherScriptText() {
     "#!/usr/bin/env sh",
     "set -eu",
     "SCRIPT_DIR=$(CDPATH= cd -- \"$(dirname -- \"$0\")\" && pwd)",
+    "# Embedded video needs an X11 window; on Wayland sessions this selects XWayland.",
+    "export GDK_BACKEND=${GDK_BACKEND:-x11,wayland}",
+    "export WEBKIT_DISABLE_DMABUF_RENDERER=${WEBKIT_DISABLE_DMABUF_RENDERER:-1}",
     "exec \"$SCRIPT_DIR/vlc-rec\" \"$@\"",
     ""
   ].join("\n");
@@ -71,6 +74,15 @@ async function buildLinuxLauncherBundles() {
 
     await fs.mkdir(bundleDir, { recursive: true });
     await fs.copyFile(binarySrc, binaryDst);
+
+    const playerName = `vlc-rec-player-linux_${arch}`;
+    const playerSrc = path.join(DIST_DIR, "player", playerName);
+    if (await pathExists(playerSrc)) {
+      const playerDst = path.join(bundleDir, "player", playerName);
+      await fs.mkdir(path.dirname(playerDst), { recursive: true });
+      await fs.copyFile(playerSrc, playerDst);
+      await fs.chmod(playerDst, 0o755);
+    }
     await fs.copyFile(ICON_SRC, iconDst);
     await fs.writeFile(launcherDst, launcherScriptText(), "utf8");
     await fs.writeFile(desktopDst, desktopFileText(), "utf8");

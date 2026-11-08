@@ -12,11 +12,16 @@ This is a NeutralinoJS port of the Python VLC Stream Recorder app.
 - Button state/label transitions for preview and recording
 - Optional automatic VLC reconnect after a stream stall, with a new numbered recording file
 - Scan dialog for discovering reachable `IP:port` endpoints on local networks
+- Preview embedded in the app window on Windows and Linux x64 through libVLC
 
 ## Requirements
 
-- VLC in `PATH` for real mode.
+- VLC 3 installed. On Debian and Ubuntu also install `vlc-plugin-access-extra`, which provides SRT.
+- Snap and Flatpak installations of VLC do not expose libVLC to the embedded player.
+- On platforms without a player binary (macOS, Linux on ARM), VLC in `PATH`; VLC then opens its own window.
+- Linux: start the app with `run-vlc-rec.sh`. It selects X11 or XWayland, which embedding needs. In development use `GDK_BACKEND=x11 npm start`.
 - Node.js 18+.
+- Building the player needs podman or docker.
 
 ## Setup
 
@@ -30,6 +35,7 @@ npm start
 ## Build
 
 ```bash
+npm run build:player   # builds player/ and the test stub in a container
 npm run build
 ```
 
@@ -68,7 +74,7 @@ git push origin v0.1.0
 
 - Enable **Automatically reconnect if the stream stalls** to restart VLC when the recording file stops growing. At startup the app measures the intervals between file growth events. After three complete intervals, the timeout becomes three times the longest of the last eight intervals, with a 3-second minimum and a default 15-second maximum. For example, regular growth every second gives a 3-second timeout; every 2 seconds gives 6 seconds. Until enough samples exist (including an empty or missing file at startup), the timeout remains 15 seconds. Learning continues during recording and resets for every new segment or checkbox change. The checkbox is saved in `vlc_rec_params.json` and is off by default.
 - Automatic recording restarts use incrementing suffixes (`name_001.mkv`, `name_002.mkv`, etc.), skipping existing files. An initial name such as `name_007.mkv` continues at `name_008.mkv`. Recovery retains the original stream address, folder and format even if the input fields are edited during recording.
-- Preview monitoring checks VLC's RC input-byte counter every 5 seconds. If VLC provides no usable statistics, the status reports that preview stall detection is unavailable. Unexpected VLC process exits are also recovered in either mode. [VLC RC statistics implementation](https://github.com/videolan/vlc/blob/3.0.x/modules/control/oldrc.c).
+- Preview monitoring checks VLC's input-byte counter every 5 seconds: from the player's `stats` events, or from VLC's RC interface when VLC runs as an external program. If VLC provides no usable statistics, the status reports that preview stall detection is unavailable. Unexpected VLC process exits are also recovered in either mode. [VLC RC statistics implementation](https://github.com/videolan/vlc/blob/3.0.x/modules/control/oldrc.c).
 - Failed reconnects and unexpected process exits retry after 5 seconds. Stop Recording / Stop Preview, closing the app, or disabling the checkbox cancels pending retries. Recovery waits for the previous VLC to exit before opening the next connection; each successful restart resets the displayed file size and elapsed time for the new segment.
 - Recovery tries to stop VLC gracefully before forcing it to exit. MKV is preferable for interrupted streams: an MP4 segment may be unusable if VLC cannot finalize it.
 - Use the **Scan** button next to the SRT input to open the scanner dialog.

@@ -19,15 +19,19 @@ function harness() {
   const elements = new Map();
   const events = new Map();
   const timeouts = [];
+  const stdin = [];
+  const env = new Map();
   const element = (id) => {
     if (!elements.has(id)) elements.set(id, {
       value: "", checked: false, hidden: true, style: {},
       addEventListener(name, handler) { this[name] = handler; },
-      setAttribute() {}, focus() {}
+      setAttribute() {}, focus() {},
+      getBoundingClientRect() { return { left: 10, top: 20, width: 640, height: 360 }; }
     });
     return elements.get(id);
   };
   const os = {
+    async getEnv(name) { return env.get(name) || ""; },
     async spawnProcess(command) {
       // A second connection may open only after the previous VLC has exited.
       assert.equal(live.size, 0);
@@ -43,9 +47,10 @@ function harness() {
       return { exitCode: 0, stdOut: "" };
     },
     async getSpawnedProcesses() { return [...live.values()]; },
-    async updateSpawnedProcess(id, action) {
+    async updateSpawnedProcess(id, action, data) {
       actions.push(action);
-      if (action === "exit") live.delete(id);
+      if (action === "stdIn") stdin.push(data);
+      if (action === "exit" || action === "stdInEnd") live.delete(id);
     },
     async showMessageBox() { assert.fail("Recovery must not open modal dialogs"); }
   };
@@ -61,7 +66,8 @@ function harness() {
   const context = createContext({
     document: { getElementById: element, activeElement: null },
     window: { addEventListener() {} },
-    NL_PATH: "/app", NL_OS: "Windows",
+    NL_PATH: "/app", NL_OS: "Windows", NL_ARCH: "x64", NL_PID: "4242",
+    TextEncoder,
     Date: class extends Date { static now() { return now; } },
     Neutralino: {
       os, filesystem, init() {}, debug: { async log() {} },
@@ -80,8 +86,13 @@ function harness() {
   const run = (code) => runInContext(code, context);
   run("parameters.auto_reconnect = true");
   return {
-    files, live, launches, actions, os, elements, events, timeouts, run,
+    files, live, launches, actions, os, elements, events, timeouts, run, stdin, env,
     advance(ms) { now += ms; },
+    enablePlayer() { files.set("/app/player/vlc-rec-player-win_x64.exe", 1); },
+    async playerOutput(data) {
+      context.outputEvent = { detail: { id: run("currentProcess.id"), action: "stdOut", data } };
+      await run("handleSpawnedProcessEvent(outputEvent)");
+    },
     async grow(ms, size) {
       now += ms;
       files.set(run("outputFile"), size);
@@ -421,6 +432,124 @@ test("closing during recovery prevents a replacement and exits the app", async (
   await h.run("monitorStream()");
   assert.equal(h.launches.length, 1);
   assert.ok(h.actions.includes("app-exit"));
+});
+
+const hex = (text) => Buffer.from(text, "utf8").toString("hex");
+
+test("the player receives hex encoded settings instead of a VLC command line", async () => {
+  const h = harness();
+  h.enablePlayer();
+  await h.start(true, "árvíz's, {1}", "mp4");
+  const command = h.launches[0];
+  assert.match(command, /^"\/app\/player\/vlc-rec-player-win_x64\.exe"/);
+  assert.match(command, /"--parent-pid" "4242"/);
+  assert.ok(command.includes(`"--url-hex" "${hex("srt://@192.168.1.2:5000")}"`));
+  assert.ok(command.includes(`"--record-hex" "${hex("C:/video captures/árvíz's, {1}.mp4")}"`));
+  assert.match(command, /"--mux" "mp4"/);
+  assert.match(command, /"--rect" "10,20,640,360"/);
+  assert.doesNotMatch(command, /--sout|--extraintf/);
+});
+
+test("the player folder from the environment replaces the one next to the app", async () => {
+  const h = harness();
+  h.env.set("VLC_REC_PLAYER_DIR", "/mount/usr/player");
+  h.files.set("/mount/usr/player/vlc-rec-player-win_x64.exe", 1);
+  await h.start();
+  assert.match(h.launches[0], /^"\/mount\/usr\/player\/vlc-rec-player-win_x64\.exe"/);
+});
+
+test("a preview player gets no recording arguments", async () => {
+  const h = harness();
+  h.enablePlayer();
+  await h.start(false);
+  assert.doesNotMatch(h.launches[0], /--record-hex|--mux/);
+});
+
+test("without a player binary the app starts external VLC", async () => {
+  const h = harness();
+  await h.start();
+  assert.match(h.launches[0], /^"vlc"/);
+  assert.match(h.launches[0], /--sout/);
+});
+
+test("preview progress comes from stats lines split across chunks; a frozen counter reconnects", async () => {
+  const h = harness();
+  h.enablePlayer();
+  await h.start(false);
+  await h.playerOutput('{"event":"stats","state":3,');
+  assert.equal(h.run("currentProcess.readBytes"), null);
+  await h.playerOutput('"readBytes":-5}\nnot json\n');
+  assert.equal(h.run("currentProcess.readBytes"), -5); // The 32-bit counter can wrap.
+  h.advance(5000);
+  await h.run("monitorStream()");
+  assert.equal(h.launches.length, 1);
+  await h.playerOutput('{"event":"stats","state":3,"readBytes":7}\n');
+  h.advance(5000);
+  await h.run("monitorStream()");
+  assert.equal(h.launches.length, 1);
+  h.advance(15000);
+  await h.run("monitorStream()");
+  assert.equal(h.launches.length, 2);
+  assert.match(h.launches[1], /vlc-rec-player/);
+  assert.equal(h.run("currentProcess.readBytes"), null);
+});
+
+test("a player stops through stdin and gets time to finalize its file", async () => {
+  const h = harness();
+  h.enablePlayer();
+  await h.start();
+  await h.run("stopOperation()");
+  assert.ok(h.stdin.some((text) => /stop/i.test(text)));
+  assert.ok(h.actions.includes("stdInEnd"));
+  assert.ok(!h.actions.includes("soft-stop"));
+  assert.ok(!h.actions.includes("exit"));
+});
+
+test("automatic recovery waits for a slow player before forcing it to exit", async () => {
+  const h = harness();
+  h.enablePlayer();
+  await h.start();
+  h.os.updateSpawnedProcess = async (id, action) => {
+    h.actions.push(action);
+    if (action === "exit") h.live.delete(id);
+  };
+  const before = h.run("Date.now()");
+  h.advance(15000);
+  await h.run("monitorStream()");
+  assert.ok(h.actions.includes("exit"));
+  assert.ok(h.run("Date.now()") - before >= 25000);
+  assert.equal(h.launches.length, 2);
+});
+
+test("window geometry and the scan dialog are forwarded to the player", async () => {
+  const h = harness();
+  h.enablePlayer();
+  await h.start();
+  h.run("openScanDialog()");
+  assert.deepEqual(h.stdin, ["HIDE\n"]);
+  h.run("closeScanDialog()");
+  assert.deepEqual(h.stdin, ["HIDE\n", "SHOW\n"]);
+});
+
+test("a player started behind the scan dialog is hidden immediately", async () => {
+  const h = harness();
+  h.enablePlayer();
+  h.elements.get("scanDialog").hidden = false;
+  await h.start();
+  assert.deepEqual(h.stdin, ["HIDE\n"]);
+});
+
+test("a player error is shown when it exits, with and without reconnect", async (t) => {
+  for (const reconnect of [false, true]) await t.test(String(reconnect), async () => {
+    const h = harness();
+    h.enablePlayer();
+    h.run(`parameters.auto_reconnect = ${reconnect}`);
+    await h.start();
+    await h.playerOutput('{"event":"error","code":"libvlc-not-found","message":"libVLC was not found. Install VLC 3."}\n');
+    await h.exit();
+    assert.match(h.run("statusText"), /libVLC was not found/);
+    assert.equal(h.run("mode"), reconnect ? "recording" : "idle");
+  });
 });
 
 test("Windows RC statistics command reads a real TCP response and handles a closed port", { skip: process.platform !== "win32" }, async () => {

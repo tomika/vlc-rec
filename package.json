@@ -9,9 +9,10 @@
     "neu:update": "neu update",
     "start": "neu run",
     "dev": "neu run",
-    "build": "neu build",
-    "package": "neu build --release --embed-resources && node scripts/postpackage-linux-launchers.js",
-    "package:clean": "neu build --clean --release --embed-resources && node scripts/postpackage-linux-launchers.js",
+    "build:player": "node scripts/build-player.js",
+    "build": "npm run build:player && neu build",
+    "package": "npm run build:player && neu build --release --embed-resources && node scripts/postpackage-linux-launchers.js",
+    "package:clean": "npm run build:player && neu build --clean --release --embed-resources && node scripts/postpackage-linux-launchers.js",
     "postinstall": "neu update"
   },
   "devDependencies": {

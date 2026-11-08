@@ -24,8 +24,31 @@ html {
   overflow: auto;
 }
 
+.layout {
+  display: flex;
+  min-height: 100vh;
+}
+
 .app {
+  flex: 0 0 440px;
   padding: 16px;
+}
+
+/* The native video window of vlc-rec-player is placed exactly over this element. */
+.video-host {
+  flex: 1 1 320px;
+  min-width: 320px;
+  margin: 16px 16px 16px 0;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  background: #000;
+  color: #7f8c8d;
+  font-size: 13px;
+}
+
+.video-host[hidden] {
+  display: none;
 }
 
 .field-label {

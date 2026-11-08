@@ -1,0 +1,6 @@
+# Build environment for vlc-rec-player. Debian 12 keeps the required glibc low
+# enough for current distributions; MinGW produces the Windows binary.
+FROM docker.io/library/debian:bookworm-slim
+RUN apt-get update && apt-get install -y --no-install-recommends \
+    gcc libc6-dev libx11-dev gcc-mingw-w64-x86-64 \
+    && rm -rf /var/lib/apt/lists/*
