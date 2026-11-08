@@ -24,23 +24,70 @@ const E2E_SCENARIO = "__SCENARIO__";
     return false;
   }
 
-  function rectInfo() {
-    const rect = videoHost.getBoundingClientRect();
+  function rectInfo(element = videoHost) {
+    const rect = element.getBoundingClientRect();
     const scale = window.devicePixelRatio || 1;
     return { width: Math.round(rect.width * scale), height: Math.round(rect.height * scale), dpr: scale };
   }
 
   async function step(name, data = {}) {
-    await Neutralino.filesystem.writeFile(`${dir}/${name}.ready`, JSON.stringify({ ...data, rect: rectInfo() }));
+    await Neutralino.filesystem.writeFile(`${dir}/${name}.ready`, JSON.stringify({ ...data, rect: rectInfo(), stage: rectInfo(stage) }));
     while (!await pathExists(`${dir}/${name}.done`)) await sleep(100);
     return JSON.parse(await Neutralino.filesystem.readFile(`${dir}/${name}.done`));
   }
 
-  const shot = async (name, expect) => {
-    await sleep(1200);
+  const shot = async (name, expect, settleMs = 1200) => {
+    await sleep(settleMs);
     const reply = await step(name, { action: "screenshot", expect });
     for (const item of reply.checks || []) check(`${name}: ${item.name}`, item.ok, item.detail);
   };
+
+  // Resizes the client area and waits until the page has seen the new size.
+  async function setWindow(width, height) {
+    await Neutralino.window.setSize({ width, height, minWidth: 320, minHeight: 240 });
+    await Neutralino.window.move(16, 16);
+    let last = "";
+    let stableSince = Date.now();
+    const start = Date.now();
+    while (Date.now() - start < 3000) {
+      const now = `${innerWidth}x${innerHeight}`;
+      if (innerWidth === width && innerHeight === height) break;
+      if (now !== last) { last = now; stableSince = Date.now(); }
+      if (Date.now() - stableSince > 600) break;
+      await sleep(100);
+    }
+    return { width: innerWidth, height: innerHeight };
+  }
+
+  const overlaps = (a, b) => a.left < b.right - 0.5 && b.left < a.right - 0.5 && a.top < b.bottom - 0.5 && b.top < a.bottom - 0.5;
+
+  // Geometry the screenshot cannot show: aspect ratio, a maximal video box, no overlap, nothing cut off.
+  function layoutChecks(label) {
+    const host = videoHost.getBoundingClientRect();
+    const room = stage.getBoundingClientRect();
+    const side = panel.getBoundingClientRect();
+    const aspect = host.width / host.height;
+    const slack = 0.005 + 2 / Math.max(1, Math.min(host.width, host.height));
+    check(`${label}: video keeps the stream's aspect ratio`, Math.abs(aspect - videoAspect) / videoAspect <= slack,
+      `${host.width}x${host.height} = ${aspect.toFixed(4)}, stream ${videoAspect.toFixed(4)}`);
+    check(`${label}: video stays inside its stage`, host.left >= room.left - 0.5 && host.top >= room.top - 0.5 &&
+      host.right <= room.right + 0.5 && host.bottom <= room.bottom + 0.5);
+    check(`${label}: video fills the stage in one direction`, room.width - host.width <= 1.5 || room.height - host.height <= 1.5,
+      `stage ${room.width}x${room.height}`);
+    check(`${label}: panel and video do not overlap`, !overlaps(side, host));
+    check(`${label}: panel has no horizontal scrolling`, panel.scrollWidth <= panel.clientWidth + 1, `${panel.scrollWidth} > ${panel.clientWidth}`);
+    for (const button of [recordBtn, previewBtn, panelToggle]) {
+      const box = button.getBoundingClientRect();
+      const visible = box.width > 0 && box.top >= side.top - 0.5 && box.bottom <= side.bottom + 0.5 && box.right <= innerWidth + 0.5;
+      check(`${label}: ${button.id} fully visible`, visible, `${Math.round(box.left)},${Math.round(box.top)} ${Math.round(box.width)}x${Math.round(box.height)}`);
+    }
+    const text = (button) => (layoutEl.classList.contains("is-compact") ? button.querySelector(".btn-label-short") : button.querySelector(".btn-label-full")) || button;
+    for (const button of [recordBtn, previewBtn]) {
+      const height = text(button).getBoundingClientRect().height;
+      check(`${label}: ${button.id} label on one line`, height < 24, `${Math.round(height)} px`);
+    }
+    check(`${label}: chosen`, true, `${layoutEl.className.replace("layout ", "")}; window ${innerWidth}x${innerHeight}; video ${Math.round(host.width)}x${Math.round(host.height)} = ${Math.round(100 * host.width * host.height / (innerWidth * innerHeight))}% of the window; panel ${Math.round(side.width)}x${Math.round(side.height)}${panel.scrollHeight > panel.clientHeight + 1 ? " scrolls" : ""}`);
+  }
 
   // Every check gets its own step name, so a reply can never belong to an earlier file.
   let verifyCount = 0;
@@ -84,7 +131,10 @@ const E2E_SCENARIO = "__SCENARIO__";
     await Neutralino.window.setAlwaysOnTop(true);
     logDebug("e2e always-on-top set");
     check("device pixel ratio", true, window.devicePixelRatio);
-    if (E2E_MODE === "stub") videoHost.style.background = "#ff00ff";
+    if (E2E_MODE === "stub") {
+      videoHost.style.background = "#ff00ff";
+      stage.style.background = "#00ffff";
+    }
 
     const folder = `${NL_PATH}/e2e/out ár'v{1},z`;
     await Neutralino.filesystem.createDirectory(folder);
@@ -131,6 +181,74 @@ const E2E_SCENARIO = "__SCENARIO__";
       } else {
         await step("kill-app", { pid: NL_PID });
       }
+      return;
+    }
+
+    if (E2E_SCENARIO === "aspect") {
+      // Real libVLC must report the display size in preview and while recording (sout).
+      // 1920x1080 H.264 is coded as 1088 lines; 1440x1080 with 4:3 pixels displays as 16:9.
+      const sources = [["hd", "1920x1080", "", 16 / 9], ["sd", "640x480", "", 4 / 3],
+        ["anamorphic", "1440x1080", "4/3", 16 / 9], ["portrait", "720x1280", "", 9 / 16]];
+      await setWindow(1120, 630);
+      for (const [name, size, sar, aspect] of sources) {
+        await step(`source-${name}`, { action: "restart-source", size, sar });
+        for (const record of [false, true]) {
+          const label = `${name} ${record ? "recording" : "preview"}`;
+          videoAspect = 0.5; // Not a size any source has, so the wait below needs a new event.
+          if (record) await configure(`aspect-${name}`, "mkv", folder);
+          click(record ? recordBtn : previewBtn);
+          await waitFor(`${label}: video size arrives`, () => Math.abs(videoAspect - aspect) / aspect < 0.002, 20000);
+          check(`${label}: reported aspect ratio`, true, videoAspect.toFixed(4));
+          await sleep(2500);
+          layoutChecks(label);
+          await shot(`${name}-${record ? "recording" : "preview"}`, "video");
+          await stopAndWait(`${label} stop`);
+        }
+        await verifyFile(`aspect-${name}.mkv`, `${folder}/aspect-${name}.mkv`);
+      }
+      // run-e2e.js puts the default source back after this scenario.
+      await finish();
+      await Neutralino.app.exit();
+      return;
+    }
+
+    if (E2E_SCENARIO === "layout") {
+      // Client areas and stream sizes (width height sarNum sarDen orientation) in all combinations.
+      // Consecutive streams differ in aspect ratio, so each one must arrive as a new "video" event.
+      const windows = [["16x9", 1280, 720], ["4x3", 1024, 768], ["1x1", 800, 800], ["21x9", 1680, 720],
+        ["portrait", 600, 1000], ["small", 640, 400], ["wide-short", 1100, 460]];
+      const streams = [["1x1", "1080 1080 1 1 0", 1], ["16x9", "1920 1080 1 1 0", 16 / 9],
+        ["portrait", "1080 1920 1 1 0", 9 / 16], ["4x3", "1440 1080 1 1 0", 4 / 3],
+        ["rotated", "1920 1080 1 1 6", 9 / 16], ["21x9", "2560 1080 1 1 0", 64 / 27],
+        ["anamorphic", "1440 1080 4 3 0", 16 / 9]];
+      const videoFile = `${dir}/stub-video.txt`;
+      for (const [name, width, height] of windows) {
+        await setWindow(width, height);
+        layoutChecks(`idle ${name}`);
+        await shot(`idle-${name}`, "layout-idle", 500);
+      }
+      await Neutralino.filesystem.writeFile(videoFile, streams[0][1]);
+      await configure("layout", "mkv", folder);
+      click(recordBtn);
+      await waitFor("layout: recording", hasStats);
+      for (const [stream, size, aspect] of streams) {
+        await Neutralino.filesystem.writeFile(videoFile, size);
+        await waitFor(`${stream}: video size arrives`, () => Math.abs(videoAspect - aspect) < 1e-6, 8000);
+        for (const [name, width, height] of windows) {
+          await setWindow(width, height);
+          panelOverride = "";
+          updateLayout();
+          layoutChecks(`${stream} in ${name}`);
+          await shot(`${stream}-in-${name}`, "layout", 500);
+          click(panelToggle);
+          layoutChecks(`${stream} in ${name} toggled`);
+          await shot(`${stream}-in-${name}-toggled`, "layout", 500);
+        }
+      }
+      await stopAndWait("layout stop");
+      await verifyFile("layout.mkv", `${folder}/layout.mkv`);
+      await finish();
+      await Neutralino.app.exit();
       return;
     }
 

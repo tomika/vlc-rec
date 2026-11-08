@@ -10,7 +10,7 @@ A videó és a felvétel nem külső VLC-ablakban fut, hanem a `vlc-rec-player` 
 Neutralino ablak (app.js)
    │  spawnProcess: egy folyamat szegmensenként
    │  stdin:  RECT x,y,w,h | HIDE | SHOW | STOP
-   │  stdout: JSON sorok (started, stats, error, stopped)
+   │  stdout: JSON sorok (started, stats, video, error, stopped)
    ▼
 vlc-rec-player (native/vlc-rec-player.c)
    ├─ megkeresi az ablakot a NL_PID alapján, és gyerekablakot nyit benne
@@ -33,6 +33,8 @@ Fontos viselkedések:
 - **A stream elvesztése:** a libVLC ilyenkor is `Playing` állapotot jelez. A kiesést ezért a fájl növekedése (felvétel) és a `readBytes` számláló (preview) figyelésével kell észlelni.
 - **`readBytes`:** 32 bites számláló, ami túlcsordulhat, ezért csak egyenlőségre szabad vizsgálni.
 - **A lejátszó nem élheti túl az appot:** a stdin lezárása vagy a szülőfolyamat eltűnése leállítja, és a leállítás lezárja a fájlt.
+- **A stream mérete:** a lejátszó a `libvlc_media_tracks_get` adataiból `video` eseményt küld (szélesség, magasság, SAR, elforgatott videónál felcserélve), amint a fejlécek feldolgozása után ismert, és ha megváltozik. Preview-ban és felvételnél (sout) is megérkezik, kb. 0,6–0,8 másodperc alatt. Az app ebből a megjelenítési képarányt számolja, és a lejátszó leállása után is megtartja.
+- **Elrendezés:** az `updateLayout` négy változatot mér le a valódi oldalon: teljes panel a videó mellett vagy alatta, illetve kompakt vezérlők mellette vagy alatta. A videó a legnagyobb, a stream képarányának megfelelő dobozt kapja, a fennmaradó hely sötét sáv. A mellette lévő panel a videó által nem használt szélességből legfeljebb 520 pixelig szélesedik. Stream közben a panel összecsukódik, ha a teljes panellel a videó a kompakt változat területének 80%-ánál kisebb lenne. Ez jellemzően akkor fordul elő, ha az ablak és a videó képaránya közel azonos. A csúszka ikonú gombbal a felhasználó felülbírálhatja ezt, és a választása addig érvényes, amíg az automatikus döntés meg nem változik.
 
 ## Előfeltételek
 
@@ -60,7 +62,7 @@ Várt eredmény: létrejön a `player/vlc-rec-player-linux_x64`, a `player/vlc-r
 npm test
 ```
 
-Várt eredmény: `pass 41`, `fail 0`.
+Várt eredmény: `pass 52`, `fail 0`.
 
 ### 3. Linux, podmanben
 
@@ -69,6 +71,11 @@ npm run test:e2e:linux
 ```
 
 Ez három futás: `stub`, `x11` és `sway`, az utóbbi kettő valódi libVLC-vel és valódi SRT-adóval. Egy futás külön is indítható: `node tests/e2e/run-linux.js x11`.
+
+Az elrendezést két forgatókönyv vizsgálja:
+
+- `layout` (csonkkal): 7 stream-méret (1:1, 16:9, 9:16, 4:3, elforgatott, 21:9, anamorf) és 7 ablakméret (16:9, 4:3, 1:1, 21:9, álló, 640×400, 1100×460) minden párosítása, automatikus és átkapcsolt állapotban is. Ellenőrzi a képarányt, a gombok láthatóságát, az átfedés hiányát és képernyőképen azt, hogy a lejátszó ablaka pontosan a videó dobozát fedi. A választott elrendezést a `chosen` sorok írják ki.
+- `aspect` (valódi libVLC-vel): 1920×1080, 640×480, anamorf 1440×1080 és álló 720×1280 forrás, preview-ban és felvétel közben is.
 
 Várt eredmény: `Linux e2e: all runs PASSED`, a képernyőképek az `e2e-output/x11/` és az `e2e-output/sway/` mappában.
 
@@ -118,7 +125,8 @@ Ezek konténerben nem vizsgálhatók, Linuxon és Windowson is el kell végezni:
 - [ ] A valódi SRT-eszköz streamje megjelenik, a hang megszólal, a kép nem akadozik.
 - [ ] A felvétel kb. 10 perc után is lejátszható MKV-ban és MP4-ben is.
 - [ ] A videó fölött és mellett kattintva a gombok működnek, a mezőkbe lehet gépelni.
-- [ ] Az ablak mozgatásakor, átméretezésekor, teljes méretre nagyításakor a videó a panelben marad.
+- [ ] Az ablak mozgatásakor, átméretezésekor, teljes méretre nagyításakor a videó a dobozában marad, és az elrendezés húzás közben sem villog.
+- [ ] A valódi eszköz képarányára igazodik a videó, és felvétel közben összecsukott panelnél is kényelmes a Stop gomb.
 - [ ] Nem 100%-os Windows-méretezésnél (pl. 150%) a videó pontosan fedi a panelt.
 - [ ] A Windowson nem villan fel konzolablak a lejátszó indulásakor.
 - [ ] Linuxon GNOME és KDE alatt is megjelenik a kép, NVIDIA kártyával is, ha van ilyen gép. Ha az ablak üres, nézd meg a Hibakeresés részt.
@@ -142,11 +150,22 @@ Ezek konténerben nem vizsgálhatók, Linuxon és Windowson is el kell végezni:
 | GitHub Actions módosítás | **Nem futott** |
 | Valódi SRT-eszköz, valódi GPU, GNOME/KDE, nem 100%-os méretezés, PipeWire | **Nem futott** |
 
+## Az elrendezés tesztelése (2026-11-08)
+
+| Ellenőrzés | Eredmény |
+|---|---|
+| Unit tesztek | 52/52 zöld |
+| Linux E2E csonkkal, benne a `layout` forgatókönyvvel (7 stream × 7 ablak, automatikus és átkapcsolt állapot) | 1452 ellenőrzés, 0 hiba |
+| Linux E2E X11 és Sway alatt valódi libVLC-vel, benne az `aspect` forgatókönyvvel | Futásonként 242 ellenőrzés, 0 hiba. A méret preview-ban és felvételnél is megjön, az 1920×1080 forrásnál 1080 sorral, az anamorf forrásnál 4:3 SAR-ral |
+| Windows E2E csonkkal | **Nem futott**: a víruskereső karanténba tette az új csonkot |
+| Windows valódi VLC-vel, nem 100%-os méretezés, valódi SRT-eszköz | **Nem futott** |
+
 ## Hibakeresés
 
 | Tünet | Teendő |
 |---|---|
-| Egy E2E forgatókönyvet kell újrafuttatni | `E2E_ONLY=main` (`main`, `closewhile`, `hardkill`, `wrongversion`, `novlc`) |
+| Egy E2E forgatókönyvet kell újrafuttatni | `E2E_ONLY=main` (`main`, `layout`, `aspect`, `closewhile`, `hardkill`, `wrongversion`, `novlc`) |
+| A víruskereső karanténba teszi a `tests/fixtures/stub/win/libvlc.dll`-t (pl. `TR/W64.Evo`) | Heurisztikus találat a MinGW-vel fordított, aláíratlan csonkon, ami csak a tesztekhez kell. Vedd fel kivételnek a `tests/fixtures/stub/` mappát, vagy futtasd a teszteket podmanben (`npm run test:e2e:linux`). |
 | Nem világos, mi történt | Képernyőképek és naplók: `e2e-output/`. A `*-app.log` a lejátszó hibáit is tartalmazza. |
 | `libVLC was not found` | Telepítsd a VLC 3-at. Windowson a `VLC_REC_LIBVLC_DIR` megadhatja a mappát, Linuxon kell a `libvlc5` csomag. |
 | Linuxon `No X11 window found` vagy `no-x11-display` | Az app nem X11-en fut. Indítsd `run-vlc-rec.sh`-val, fejlesztéskor `GDK_BACKEND=x11 npm start`. |

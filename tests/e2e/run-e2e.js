@@ -82,6 +82,19 @@ function screenChecks(name, request) {
   const detail = `area=${area} saturated=${counts.saturated} black=${counts.black} magenta=${counts.magenta}`;
   const expect = request.expect;
   if (expect === "any") return [];
+  if (expect === "layout" || expect === "layout-idle") {
+    // Stub mode: the stage around the video box is cyan, the box itself magenta, and
+    // the player's black window must cover exactly the box: no magenta left, the cyan intact.
+    const cyanWanted = request.stage.width * request.stage.height - area;
+    const tolerance = 0.02 * cyanWanted + 4 * (request.stage.width + request.stage.height);
+    const covered = expect === "layout"
+      ? { name: "player window covers the video box", ok: counts.magenta === 0 }
+      : { name: "video box visible", ok: counts.magenta >= area * 0.95 };
+    return [
+      { ...covered, detail },
+      { name: "player window stays inside the video box", ok: Math.abs(counts.cyan - cyanWanted) <= tolerance, detail: `cyan=${counts.cyan} wanted=${cyanWanted}` }
+    ];
+  }
   if (MODE === "stub") {
     // The panel is magenta and the player's child window is black on top of it.
     if (expect === "video") {
@@ -140,21 +153,29 @@ function verifyFile(request) {
 
 let source = null;
 let sourceWanted = false;
-function startSource() {
+let sourceOptions = {};
+// options.size: frame size such as 1440x1080; options.sar: sample aspect ratio such as 4/3.
+function startSource(options = {}) {
   sourceWanted = true;
-  source = spawn(FFMPEG, [
+  sourceOptions = { size: options.size, sar: options.sar };
+  const filter = options.sar ? ["-vf", `setsar=${options.sar}`] : [];
+  const proc = spawn(FFMPEG, [
     "-hide_banner", "-loglevel", "error", "-re",
-    "-f", "lavfi", "-i", "testsrc2=size=1280x720:rate=25",
+    "-f", "lavfi", "-i", `testsrc2=size=${options.size || "1280x720"}:rate=25`,
     "-f", "lavfi", "-i", "sine=frequency=1000:sample_rate=48000",
+    ...filter,
     "-c:v", "libx264", "-preset", "ultrafast", "-tune", "zerolatency", "-g", "25", "-pix_fmt", "yuv420p",
     "-c:a", "aac", "-b:a", "128k", "-f", "mpegts",
     "srt://127.0.0.1:5000?mode=listener&pkt_size=1316"
   ], { stdio: "ignore", windowsHide: true });
+  source = proc;
   // Like a hardware encoder, accept the next connection after a client leaves.
-  source.on("exit", () => {
-    if (sourceWanted) setTimeout(() => { if (sourceWanted) startSource(); }, 200);
+  // A replaced source must not restart itself.
+  proc.on("exit", () => {
+    const again = () => sourceWanted && source === proc;
+    if (again()) setTimeout(() => { if (again()) startSource(options); }, 200);
   });
-  source.on("error", (err) => report("source", "ffmpeg starts", false, err.message));
+  proc.on("error", (err) => report("source", "ffmpeg starts", false, err.message));
 }
 function stopSource() {
   sourceWanted = false;
@@ -198,9 +219,11 @@ async function runScenario(scenario, env) {
   const binary = APPIMAGE || plainBinary;
   const dir = path.join(app, "e2e");
   const logFile = fs.openSync(path.join(OUT, `${scenario}-neutralino.log`), "w");
+  // The driver writes the video size the stub reports into this file.
+  const stubVideo = { LIBVLC_STUB_VIDEO_FILE: path.join(dir, "stub-video.txt") };
   // Forward slashes: Neutralino writes this value into a JS string without escaping it.
   const child = spawn(binary, ["--load-dir-res", `--path=${app.replace(/\\/g, "/")}`, "--enable-extensions=false"], {
-    cwd: app, env: { ...process.env, ...env }, stdio: ["ignore", logFile, logFile]
+    cwd: app, env: { ...process.env, ...stubVideo, ...env }, stdio: ["ignore", logFile, logFile]
   });
   let exited = false;
   child.on("exit", () => { exited = true; });
@@ -208,7 +231,9 @@ async function runScenario(scenario, env) {
   const handled = new Set();
   const started = Date.now();
   let killedApp = false;
-  while (!exited && Date.now() - started < SCENARIO_TIMEOUT_MS) {
+  // The layout scenario takes about a hundred screenshots.
+  const timeoutMs = scenario === "layout" ? SCENARIO_TIMEOUT_MS * 3 : SCENARIO_TIMEOUT_MS;
+  while (!exited && Date.now() - started < timeoutMs) {
     for (const entry of fs.readdirSync(dir)) {
       if (!entry.endsWith(".ready") || handled.has(entry)) continue;
       handled.add(entry);
@@ -221,13 +246,19 @@ async function runScenario(scenario, env) {
       else if (name === "kill-player") killPlayer();
       else if (name === "kill-source") stopSource();
       else if (name === "start-source") startSource();
+      else if (request.action === "restart-source") {
+        stopSource();
+        await sleep(500);
+        startSource(request);
+        await sleep(1500);
+      }
       else if (name === "kill-app") { killedApp = true; killProcess(Number(request.pid)); }
       fs.writeFileSync(path.join(dir, `${name}.done`), JSON.stringify(reply));
     }
     await sleep(100);
   }
   if (!exited) {
-    report(scenario, "app finished in time", false, `${SCENARIO_TIMEOUT_MS} ms`);
+    report(scenario, "app finished in time", false, `${timeoutMs} ms`);
     killProcess(child.pid);
   } else if (!killedApp) {
     report(scenario, "app exited by itself", true);
@@ -255,6 +286,14 @@ async function runScenario(scenario, env) {
       report(scenario, item.name, item.ok, item.detail);
     }
   }
+  // A scenario that changed the source, even one that failed, must not leave it changed.
+  if (sourceWanted && (sourceOptions.size || sourceOptions.sar)) {
+    stopSource();
+    await sleep(500);
+    startSource();
+    await sleep(1500);
+  }
+
   const neutralinoLog = path.join(app, "neutralinojs.log");
   // Not copyFileSync: it also copies permissions, which a mounted Windows folder refuses.
   if (fs.existsSync(neutralinoLog)) fs.writeFileSync(path.join(OUT, `${scenario}-app.log`), fs.readFileSync(neutralinoLog));
@@ -269,6 +308,7 @@ async function main() {
   if (MODE === "stub") {
     baseEnv.VLC_REC_LIBVLC_DIR = path.join(repo, "tests", "fixtures", "stub", WIN ? "win" : "linux");
     await runScenario("main", baseEnv);
+    await runScenario("layout", baseEnv);
     await runScenario("closewhile", baseEnv);
     await runScenario("hardkill", baseEnv);
     await runScenario("wrongversion", { ...baseEnv, LIBVLC_STUB_VERSION: "4.0.0" });
@@ -277,6 +317,7 @@ async function main() {
     startSource();
     await sleep(1500);
     await runScenario("main", baseEnv);
+    await runScenario("aspect", baseEnv);
     await runScenario("closewhile", baseEnv);
     await runScenario("hardkill", baseEnv);
     if (APPIMAGE) await runScenario("dialogs", baseEnv);

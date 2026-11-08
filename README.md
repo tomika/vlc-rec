@@ -13,6 +13,7 @@ This is a NeutralinoJS port of the Python VLC Stream Recorder app.
 - Optional automatic VLC reconnect after a stream stall, with a new numbered recording file
 - Scan dialog for discovering reachable `IP:port` endpoints on local networks
 - Preview embedded in the app window on Windows and Linux x64 through libVLC
+- The preview gets the largest area its aspect ratio allows; while streaming, the controls collapse to a compact bar when they would cost the video too much room
 
 ## Requirements
 
@@ -110,6 +111,7 @@ git push origin v0.1.0
 - Preview monitoring checks VLC's input-byte counter every 5 seconds: from the player's `stats` events, or from VLC's RC interface when VLC runs as an external program. If VLC provides no usable statistics, the status reports that preview stall detection is unavailable. Unexpected VLC process exits are also recovered in either mode. [VLC RC statistics implementation](https://github.com/videolan/vlc/blob/3.0.x/modules/control/oldrc.c).
 - Failed reconnects and unexpected process exits retry after 5 seconds. Stop Recording / Stop Preview, closing the app, or disabling the checkbox cancels pending retries. Recovery waits for the previous VLC to exit before opening the next connection; each successful restart resets the displayed file size and elapsed time for the new segment.
 - Recovery tries to stop VLC gracefully before forcing it to exit. MKV is preferable for interrupted streams: an MP4 segment may be unusable if VLC cannot finalize it.
+- The app reads the stream's size, including non-square pixels and rotation, and sizes the preview to its aspect ratio. The settings panel goes beside or below the preview, whichever leaves the larger picture. While a stream runs, the panel collapses to the essentials (elapsed time, file size, status, the start/stop buttons) when the full panel would leave the preview less than 80% of the area it gets with the compact controls, typically when the window has about the same aspect ratio as the stream. The sliders button next to the start/stop buttons hides or shows the settings; that choice lasts until the automatic choice changes, for example when the stream stops.
 - Use the **Scan** button next to the SRT input to open the scanner dialog.
 - Scanner supports explicit mask input (for example: `192.168.1.*`) and automatic local-network scan when mask is empty.
 - Scan runs asynchronously with configurable concurrency (default 25) and can be aborted manually or by selecting a found endpoint. Aborting is immediate.

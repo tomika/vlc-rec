@@ -22,6 +22,11 @@ const scanProgressBar = document.getElementById("scanProgressBar");
 const scanProgressBarFill = document.getElementById("scanProgressBarFill");
 const scanResults = document.getElementById("scanResults");
 const videoHost = document.getElementById("videoHost");
+const layoutEl = document.getElementById("layout");
+const panel = document.getElementById("panel");
+const stage = document.getElementById("stage");
+const panelToggle = document.getElementById("panelToggle");
+const modeBadge = document.getElementById("modeBadge");
 
 const DEFAULT_PARAMS = {
   ip_address: "127.0.0.1:5000",
@@ -59,6 +64,24 @@ const RECORDING_CADENCE_MIN_SAMPLES = 3;
 const RECORDING_STALL_MIN_MS = 3000;
 // The player finalizes the output file while stopping; large MP4 files need time.
 const PLAYER_STOP_GRACE_MS = 10000;
+// The panel goes beside or below the video, in full or as the compact essentials.
+const LAYOUTS = [
+  { name: "side", compact: false },
+  { name: "stack", compact: false },
+  { name: "side", compact: true },
+  { name: "stack", compact: true }
+];
+const DEFAULT_VIDEO_ASPECT = 16 / 9;
+// While a stream runs, the panel collapses when the full panel would leave the
+// video less than this share of the area it gets next to the compact controls.
+// It expands again only above the second share, so resizing near the limit does
+// not flip it back and forth.
+const FULL_PANEL_MIN_SHARE = 0.8;
+const FULL_PANEL_EXPAND_SHARE = 0.85;
+// Resizing keeps the current arrangement while it is nearly as good, so the panel
+// does not jump between the side and the bottom around the break-even size.
+const LAYOUT_KEEP_SHARE = 0.97;
+const SIDE_PANEL_MAX_WIDTH = 520;
 
 let parameters = { ...DEFAULT_PARAMS };
 let mode = "idle";
@@ -73,6 +96,19 @@ let uiBusy = false;
 let activeSession = null;
 let monitorBusy = false;
 let closeRequested = false;
+// Display aspect ratio of the stream; the last one is kept after the player stops.
+let videoAspect = DEFAULT_VIDEO_ASPECT;
+let layoutReady = false;
+let currentLayout = null;
+let lastAutoCompact = null;
+// What the last layout pass was computed from, and the stage size it produced.
+let layoutInputs = "";
+let layoutStageSize = "";
+// True while a player is being started, so the layout is already the streaming one
+// when the player receives its rectangle.
+let startingStream = false;
+// "", "full" or "compact": a choice made with the toggle button.
+let panelOverride = "";
 let scanState = {
   running: false,
   abortRequested: false,
@@ -150,6 +186,8 @@ function logDebug(message) {
 
 function setStatus(text) {
   status.textContent = text || "";
+  // Narrow layouts cut the message to one line; the tooltip shows all of it.
+  status.title = text || "";
 }
 
 function setScanProgress(text) {
@@ -1003,8 +1041,8 @@ function videoRectArg() {
   return [rect.left, rect.top, rect.width, rect.height].map((value) => Math.round(value * scale)).join(",");
 }
 
-function buildPlayerCommand(playerPath, streamUri, record, ext, fullOutput) {
-  const args = ["--parent-pid", String(NL_PID), "--url-hex", utf8Hex(streamUri), "--rect", videoRectArg()];
+function buildPlayerCommand(playerPath, streamUri, record, ext, fullOutput, rect) {
+  const args = ["--parent-pid", String(NL_PID), "--url-hex", utf8Hex(streamUri), "--rect", rect];
   if (record) args.push("--record-hex", utf8Hex(fullOutput), "--mux", ext === "mp4" ? "mp4" : "mkv");
   return buildCommand(playerPath, args);
 }
@@ -1027,11 +1065,160 @@ function handlePlayerOutput(proc, chunk) {
       continue;
     }
     if (message.event === "stats") proc.readBytes = message.readBytes;
+    if (message.event === "video") setVideoSize(message);
     if (message.event === "error") {
       proc.errorMessage = String(message.message || "");
       logDebug(`Player error ${message.code}: ${proc.errorMessage}`);
     }
   }
+}
+
+// Display aspect ratio from the player's "video" event; anamorphic video has a
+// sample aspect ratio other than 1:1.
+function displayAspect({ width, height, sarNum, sarDen }) {
+  const aspect = (Number(width) * (Number(sarNum) || 1)) / (Number(height) * (Number(sarDen) || 1));
+  return Number.isFinite(aspect) && aspect >= 0.1 && aspect <= 10 ? aspect : 0;
+}
+
+function setVideoSize(message) {
+  const aspect = displayAspect(message);
+  if (!aspect || Math.abs(aspect - videoAspect) < 1e-6) return;
+  logDebug(`Video size ${message.width}x${message.height}, sample aspect ${message.sarNum}:${message.sarDen}`);
+  videoAspect = aspect;
+  updateLayout();
+}
+
+function fitToAspect(width, height, aspect) {
+  if (!(width > 0 && height > 0 && aspect > 0)) return { width: 0, height: 0 };
+  return width / height > aspect
+    ? { width: height * aspect, height }
+    : { width, height: width / aspect };
+}
+
+// stages[i] is the room LAYOUTS[i] leaves for the video. Returns the best full and
+// the best compact layout, and whether the compact one gives the video much more.
+// wasCompact: the previous automatic choice was compact.
+function chooseLayout(stages, aspect, current, wasCompact = false) {
+  const scored = LAYOUTS.map((layout, index) => {
+    const video = fitToAspect(stages[index].width, stages[index].height, aspect);
+    return { ...layout, index, area: video.width * video.height };
+  });
+  const best = (compact) => {
+    const options = scored.filter((item) => item.compact === compact);
+    const top = options.reduce((a, b) => (b.area > a.area ? b : a));
+    const kept = current && options.find((item) => item.name === current.name);
+    return kept && kept.area >= top.area * LAYOUT_KEEP_SHARE ? kept : top;
+  };
+  const full = best(false);
+  const compact = best(true);
+  const share = wasCompact ? FULL_PANEL_EXPAND_SHARE : FULL_PANEL_MIN_SHARE;
+  return { full, compact, compactWins: full.area < compact.area * share };
+}
+
+function layoutClassName(layout) {
+  return `layout is-${layout.name}${layout.compact ? " is-compact" : ""}`;
+}
+
+function applyLayoutClass(layout) {
+  layoutEl.className = layoutClassName(layout);
+  // Fonts differ between systems, so whether a full button label fits is measured.
+  panel.classList.remove("short-labels");
+  if (!layout.compact && [recordBtn, previewBtn].some((button) => button.scrollWidth > button.clientWidth + 1)) {
+    panel.classList.add("short-labels");
+  }
+}
+
+function syncPlayerRect() {
+  const proc = currentProcess;
+  if (!proc || !proc.player) return;
+  const rect = videoRectArg();
+  if (proc.sentRect === rect) return;
+  proc.sentRect = rect;
+  sendPlayerCommand(`RECT ${rect}`);
+}
+
+function layoutInputKey() {
+  return [window.innerWidth, window.innerHeight, window.devicePixelRatio, videoAspect, mode,
+    startingStream, panelOverride, videoHost.hidden].join("|");
+}
+
+// Measuring switches the panel through every layout, which can clamp its scroll
+// position and hide the field being typed in; both are put back afterwards.
+function keepPanelState(fn) {
+  const scrollTop = panel.scrollTop;
+  const focused = document.activeElement;
+  const inPanel = Boolean(focused && focused !== document.body && panel.contains(focused));
+  let selection = null;
+  try {
+    if (inPanel && typeof focused.selectionStart === "number") selection = [focused.selectionStart, focused.selectionEnd];
+  } catch {
+    // Some input types have no selection.
+  }
+  fn();
+  panel.scrollTop = scrollTop;
+  if (inPanel && document.activeElement !== focused && focused.getClientRects().length > 0) {
+    focused.focus({ preventScroll: true });
+    if (selection) focused.setSelectionRange(...selection);
+  }
+}
+
+// Gives the video the largest box of its aspect ratio that the window allows, then
+// moves the player's window onto it. Each candidate is measured in the real page,
+// so fonts and wrapping are always accounted for; nothing is painted in between.
+// It runs again only when something it depends on changed, or when forced.
+function updateLayout(force = false) {
+  if (!layoutReady) return;
+  if (!force && layoutInputKey() === layoutInputs) return;
+  if (videoHost.hidden) {
+    layoutEl.className = "layout is-side no-video";
+    layoutInputs = layoutInputKey();
+    return;
+  }
+  keepPanelState(() => arrangeLayout());
+  layoutInputs = layoutInputKey();
+  syncPlayerRect();
+}
+
+function arrangeLayout() {
+  panel.style.width = "";
+  const stages = LAYOUTS.map((layout) => {
+    applyLayoutClass(layout);
+    const box = stage.getBoundingClientRect();
+    return { width: box.width, height: box.height, panelWidth: panel.getBoundingClientRect().width };
+  });
+  const { full, compact, compactWins } = chooseLayout(stages, videoAspect, currentLayout, Boolean(lastAutoCompact));
+  const autoCompact = (mode !== "idle" || startingStream) && compactWins;
+  // A choice made with the toggle button lasts until the automatic choice changes.
+  if (autoCompact !== lastAutoCompact) panelOverride = "";
+  lastAutoCompact = autoCompact;
+  const layout = (panelOverride ? panelOverride === "compact" : autoCompact) ? compact : full;
+  currentLayout = layout;
+  applyLayoutClass(layout);
+
+  // Width the video cannot use widens the full side panel, up to a limit, instead of
+  // leaving bars between the panel and the video. Below the video the panel keeps
+  // its height and the video is centered in the dark stage, as in a player.
+  if (!layout.compact && layout.name === "side") {
+    const room = stages[layout.index];
+    const fitted = fitToAspect(room.width, room.height, videoAspect);
+    panel.style.width = `${Math.floor(Math.min(SIDE_PANEL_MAX_WIDTH, room.panelWidth + room.width - fitted.width))}px`;
+    applyLayoutClass(layout);
+  }
+
+  const rect = stage.getBoundingClientRect();
+  const video = fitToAspect(rect.width, rect.height, videoAspect);
+  const width = Math.floor(video.width);
+  const height = Math.floor(video.height);
+  videoHost.style.width = `${width}px`;
+  videoHost.style.height = `${height}px`;
+  videoHost.style.left = `${Math.floor((rect.width - width) / 2)}px`;
+  videoHost.style.top = `${Math.floor((rect.height - height) / 2)}px`;
+  layoutStageSize = `${rect.width}x${rect.height}`;
+
+  const label = layout.compact ? "Show settings" : "Hide settings";
+  panelToggle.setAttribute("aria-expanded", String(!layout.compact));
+  panelToggle.setAttribute("aria-label", label);
+  panelToggle.title = label;
 }
 
 function buildCommand(executable, args) {
@@ -1541,8 +1728,13 @@ async function startOperation({ record, ipAddress, outputPathValue, filenameBase
         simLastTickSec = 0;
       }
     } else {
+      // Arrange the window for streaming first, so the player's window opens at its
+      // final place instead of jumping there after the start.
+      startingStream = true;
+      updateLayout();
+      const startRect = videoRectArg();
       const command = playerPath
-        ? buildPlayerCommand(playerPath, streamUri, record, ext, fullOutput)
+        ? buildPlayerCommand(playerPath, streamUri, record, ext, fullOutput, startRect)
         : buildCommand("vlc", args);
       logDebug(`Launching VLC with command: ${command}`);
       const procInfo = await Neutralino.os.spawnProcess(command);
@@ -1555,20 +1747,26 @@ async function startOperation({ record, ipAddress, outputPathValue, filenameBase
         command,
         token,
         player: Boolean(playerPath),
+        // A later layout change sends RECT only when it differs from this.
+        sentRect: startRect,
         readBytes: null,
         lineBuffer: "",
         errorMessage: ""
       };
+      // The layout may have changed while the process was starting.
+      syncPlayerRect();
       // A reconnect can start a player while the scan dialog covers the window.
       if (!scanDialog.hidden) sendPlayerCommand("HIDE");
     }
   } catch (err) {
+    startingStream = false;
     const message = friendlySpawnError(err);
     logDebug(`Failed to spawn VLC: ${message}`);
     if (!recoverySession) resetState(message);
     return { ok: false, error: message };
   }
 
+  startingStream = false;
   mode = record ? "recording" : "preview";
   activeSession = recoverySession || createSession({ record, ipAddress, outputPathValue, filenameBase: outputFilename, ext });
   resetSessionProgress(activeSession);
@@ -1594,20 +1792,33 @@ function payload() {
   };
 }
 
+// The short label is for the compact layout and for buttons too narrow for the full one.
+function setButtonLabel(button, full, short) {
+  if (button.dataset.label === full) return;
+  button.dataset.label = full;
+  const fullLabel = document.createElement("span");
+  fullLabel.className = "btn-label-full";
+  fullLabel.textContent = full;
+  const shortLabel = document.createElement("span");
+  shortLabel.className = "btn-label-short";
+  shortLabel.textContent = short;
+  button.replaceChildren(fullLabel, shortLabel);
+}
+
 function updateButtons() {
   let basePreviewDisabled = false;
 
   if (mode === "recording") {
-    recordBtn.textContent = "Stop Recording";
-    previewBtn.textContent = "Preview Only";
+    setButtonLabel(recordBtn, "Stop Recording", "Stop Recording");
+    setButtonLabel(previewBtn, "Preview Only", "Preview");
     basePreviewDisabled = true;
   } else if (mode === "preview") {
-    recordBtn.textContent = "Start VLC Stream & Record";
-    previewBtn.textContent = "Stop Preview";
+    setButtonLabel(recordBtn, "Start Recording", "Record");
+    setButtonLabel(previewBtn, "Stop Preview", "Stop Preview");
     basePreviewDisabled = false;
   } else {
-    recordBtn.textContent = "Start VLC Stream & Record";
-    previewBtn.textContent = "Preview Only";
+    setButtonLabel(recordBtn, "Start Recording", "Record");
+    setButtonLabel(previewBtn, "Preview Only", "Preview");
     basePreviewDisabled = false;
   }
 
@@ -1621,8 +1832,12 @@ function updateButtons() {
 
 function applyState(state) {
   mode = state.mode || "idle";
-  fileSize.textContent = `File Size: ${state.fileSize || "0 B"}`;
-  elapsed.textContent = `Time Elapsed: ${state.elapsed || "00:00:00"}`;
+  fileSize.textContent = state.fileSize || "0 B";
+  elapsed.textContent = state.elapsed || "00:00:00";
+  layoutEl.dataset.mode = mode;
+  modeBadge.hidden = mode === "idle";
+  modeBadge.className = `mode-badge is-${mode}`;
+  modeBadge.textContent = mode === "recording" ? "REC" : mode === "preview" ? "PREVIEW" : "";
   setStatus(state.status || "");
   autoReconnect.checked = Boolean(parameters.auto_reconnect);
 
@@ -1634,6 +1849,7 @@ function applyState(state) {
   }
 
   updateButtons();
+  updateLayout();
 }
 
 async function refreshState() {
@@ -1732,14 +1948,19 @@ async function init() {
   });
 
   await loadParams();
+  videoHost.hidden = !await findPlayerBinary();
+  layoutReady = true;
   await refreshState();
   ensureBashAvailable().catch(() => {});
-  videoHost.hidden = !await findPlayerBinary();
 
-  const syncPlayerRect = () => sendPlayerCommand(`RECT ${videoRectArg()}`);
-  new ResizeObserver(syncPlayerRect).observe(videoHost);
-  window.addEventListener("resize", syncPlayerRect);
-  window.addEventListener("scroll", syncPlayerRect, true);
+  window.addEventListener("resize", () => updateLayout());
+  // The stage can also change size without a window resize, for example when a
+  // longer file size wraps a line of the bottom panel.
+  new ResizeObserver(() => {
+    if (videoHost.hidden) return;
+    const box = stage.getBoundingClientRect();
+    if (`${box.width}x${box.height}` !== layoutStageSize) updateLayout(true);
+  }).observe(stage);
 
   setInterval(() => {
     (async () => {
@@ -1837,6 +2058,11 @@ extension.addEventListener("change", () => {
 
 scanBtn.addEventListener("click", () => {
   openScanDialog();
+});
+
+panelToggle.addEventListener("click", () => {
+  panelOverride = currentLayout && currentLayout.compact ? "full" : "compact";
+  updateLayout();
 });
 
 startScanBtn.addEventListener("click", () => {

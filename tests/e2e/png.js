@@ -51,12 +51,13 @@ function readPng(file) {
 
 // saturated: pure video colors, which no app styling comes close to.
 function countPixels(png) {
-  const counts = { saturated: 0, black: 0, magenta: 0 };
+  const counts = { saturated: 0, black: 0, magenta: 0, cyan: 0 };
   for (let i = 0; i < png.pixels.length; i += png.channels) {
     const r = png.pixels[i], g = png.pixels[i + 1], b = png.pixels[i + 2];
     if (Math.max(r, g, b) - Math.min(r, g, b) > 200) counts.saturated += 1;
     if (r === 0 && g === 0 && b === 0) counts.black += 1;
     if (r === 255 && g === 0 && b === 255) counts.magenta += 1;
+    if (r === 0 && g === 255 && b === 255) counts.cyan += 1;
   }
   return counts;
 }

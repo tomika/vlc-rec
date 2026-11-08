@@ -23,9 +23,11 @@ function harness() {
   const env = new Map();
   const element = (id) => {
     if (!elements.has(id)) elements.set(id, {
-      value: "", checked: false, hidden: true, style: {},
+      value: "", checked: false, hidden: true, style: {}, dataset: {}, attributes: {},
+      classList: { names: new Set(), add(name) { this.names.add(name); }, remove(name) { this.names.delete(name); } },
       addEventListener(name, handler) { this[name] = handler; },
-      setAttribute() {}, focus() {},
+      setAttribute(name, value) { this.attributes[name] = value; }, focus() {},
+      replaceChildren(...children) { this.children = children; },
       getBoundingClientRect() { return { left: 10, top: 20, width: 640, height: 360 }; }
     });
     return elements.get(id);
@@ -64,7 +66,7 @@ function harness() {
     async readFile(path) { return files.get(path); }
   };
   const context = createContext({
-    document: { getElementById: element, activeElement: null },
+    document: { getElementById: element, activeElement: null, createElement: () => ({}) },
     window: { addEventListener() {} },
     NL_PATH: "/app", NL_OS: "Windows", NL_ARCH: "x64", NL_PID: "4242",
     TextEncoder,
@@ -550,6 +552,224 @@ test("a player error is shown when it exits, with and without reconnect", async 
     assert.match(h.run("statusText"), /libVLC was not found/);
     assert.equal(h.run("mode"), reconnect ? "recording" : "idle");
   });
+});
+
+// Room for the video in each layout of a 1280x720 window, as the page would measure it.
+const ROOM_16_9_WINDOW = {
+  "layout is-side": { width: 896, height: 720, panelWidth: 384 },
+  "layout is-stack": { width: 1280, height: 570, panelWidth: 1280 },
+  "layout is-side is-compact": { width: 1108, height: 720, panelWidth: 172 },
+  "layout is-stack is-compact": { width: 1280, height: 674, panelWidth: 1280 }
+};
+const ROOM_21_9_WINDOW = {
+  "layout is-side": { width: 1296, height: 720, panelWidth: 384 },
+  "layout is-stack": { width: 1680, height: 570, panelWidth: 1680 },
+  "layout is-side is-compact": { width: 1508, height: 720, panelWidth: 172 },
+  "layout is-stack is-compact": { width: 1680, height: 674, panelWidth: 1680 }
+};
+const stagesFor = (room) => ["layout is-side", "layout is-stack", "layout is-side is-compact", "layout is-stack is-compact"].map((name) => room[name]);
+
+function layoutHarness(room) {
+  const h = harness();
+  h.enablePlayer();
+  const layout = h.elements.get("layout");
+  const panel = h.elements.get("panel");
+  const host = h.elements.get("videoHost");
+  let measured = 0;
+  // The stage reports the room of whichever layout class is applied at that moment.
+  h.elements.get("stage").getBoundingClientRect = () => {
+    measured += 1;
+    const box = room.current[layout.className];
+    // A side panel widened by app.js takes the extra width from the stage.
+    const width = box.width - (Number.parseFloat(panel.style.width) || box.panelWidth) + box.panelWidth;
+    return { width, height: box.height };
+  };
+  panel.getBoundingClientRect = () => ({ width: room.current[layout.className].panelWidth });
+  // The video box is where app.js put it.
+  host.getBoundingClientRect = () => {
+    const [left, top, width, height] = ["left", "top", "width", "height"].map((key) => Number.parseFloat(host.style[key]) || 0);
+    return { left, top, width, height };
+  };
+  h.run("videoHost.hidden = false; layoutReady = true");
+  return {
+    ...h, layout, panel, host: host.style, toggle: h.elements.get("panelToggle"),
+    measured: () => measured,
+    rects: () => h.stdin.filter((line) => line.startsWith("RECT")),
+    // Like a window resize: new room and a new window size for the change detection.
+    resize(next) {
+      room.current = next;
+      h.run(`window.innerWidth = ${next["layout is-stack"].width}; window.innerHeight = ${next["layout is-side"].height}`);
+      h.run("updateLayout()");
+    }
+  };
+}
+
+test("anamorphic and rotated sizes give the display aspect ratio; nonsense is ignored", () => {
+  const h = harness();
+  assert.equal(h.run("displayAspect({ width: 1440, height: 1080, sarNum: 4, sarDen: 3 })"), 16 / 9);
+  assert.equal(h.run("displayAspect({ width: 1080, height: 1920, sarNum: 1, sarDen: 1 })"), 9 / 16);
+  assert.equal(h.run("displayAspect({ width: 720, height: 576, sarNum: 0, sarDen: 0 })"), 1.25);
+  assert.equal(h.run("displayAspect({ width: 1, height: 1000 })"), 0);
+  assert.equal(h.run("displayAspect({ width: 'x', height: 1080 })"), 0);
+});
+
+test("the layout with the largest video wins, and compact wins only by a clear margin", () => {
+  const h = harness();
+  const wide = h.run(`chooseLayout(${JSON.stringify(stagesFor(ROOM_16_9_WINDOW))}, 16 / 9, null)`);
+  assert.equal(wide.full.name, "stack");
+  assert.equal(wide.compact.name, "stack");
+  assert.equal(wide.compactWins, true);
+  // A 21:9 window has room for the full panel beside 16:9 video.
+  const cinema = h.run(`chooseLayout(${JSON.stringify(stagesFor(ROOM_21_9_WINDOW))}, 16 / 9, null)`);
+  assert.equal(cinema.full.name, "side");
+  assert.equal(cinema.compactWins, false);
+  // 4:3 video in the 16:9 window leaves room beside it, so the full side panel costs little.
+  const classic = h.run(`chooseLayout(${JSON.stringify(stagesFor(ROOM_16_9_WINDOW))}, 4 / 3, null)`);
+  assert.equal(classic.full.name, "side");
+  assert.equal(classic.compactWins, false);
+});
+
+test("a nearly equal layout is kept while resizing", () => {
+  const h = harness();
+  const stages = JSON.stringify([
+    { width: 1010, height: 600 }, { width: 1020, height: 600 },
+    { width: 1000, height: 600 }, { width: 1100, height: 580 }
+  ]);
+  assert.equal(h.run(`chooseLayout(${stages}, 16 / 9, null)`).full.name, "stack");
+  assert.equal(h.run(`chooseLayout(${stages}, 16 / 9, { name: "side" })`).full.name, "side");
+});
+
+test("the full panel collapses below 80% and expands again only above 85%", () => {
+  const h = harness();
+  // The full panel leaves 905x905 for square video, the compact one 1000x1000: 82%.
+  const stages = JSON.stringify([{ width: 905, height: 905 }, { width: 1, height: 1 }, { width: 1000, height: 1000 }, { width: 1, height: 1 }]);
+  assert.equal(h.run(`chooseLayout(${stages}, 1, null, false)`).compactWins, false);
+  assert.equal(h.run(`chooseLayout(${stages}, 1, null, true)`).compactWins, true);
+});
+
+test("streaming collapses the panel when the window matches the video; the toggle overrides it until the situation changes", async () => {
+  const room = { current: ROOM_16_9_WINDOW };
+  const h = layoutHarness(room);
+  h.run("updateLayout()");
+  assert.equal(h.layout.className, "layout is-stack");
+  assert.equal(h.toggle.attributes["aria-expanded"], "true");
+
+  // The layout is arranged before the start, so the player opens at its final place.
+  await h.start();
+  assert.match(h.launches[0], /"--rect" "41,0,1198,674"/);
+  await h.run("refreshState()");
+  assert.equal(h.layout.className, "layout is-stack is-compact");
+  assert.equal(h.toggle.attributes["aria-expanded"], "false");
+  assert.deepEqual([h.host.width, h.host.height], ["1198px", "674px"]);
+  assert.deepEqual(h.rects(), [], "the player already has this rectangle");
+
+  h.toggle.click();
+  assert.equal(h.layout.className, "layout is-stack");
+  assert.deepEqual(h.rects(), ["RECT 133,0,1013,570\n"]);
+  await h.run("refreshState()");
+  assert.equal(h.layout.className, "layout is-stack", "the user's choice survives the periodic refresh");
+
+  // A wider window has room for the full panel, so the automatic choice changes.
+  h.resize(ROOM_21_9_WINDOW);
+  assert.equal(h.layout.className, "layout is-side");
+  h.resize(ROOM_16_9_WINDOW);
+  assert.equal(h.layout.className, "layout is-stack is-compact");
+
+  await h.run("stopOperation()");
+  assert.equal(h.layout.className, "layout is-stack");
+});
+
+test("the layout is measured again only when something it depends on changed", async () => {
+  const room = { current: ROOM_16_9_WINDOW };
+  const h = layoutHarness(room);
+  h.run("updateLayout()");
+  const afterFirst = h.measured();
+  for (let i = 0; i < 3; i += 1) await h.run("refreshState()");
+  assert.equal(h.measured(), afterFirst);
+  h.resize(ROOM_21_9_WINDOW);
+  assert.ok(h.measured() > afterFirst);
+  // The stage observer forces a pass when the stage changed for another reason.
+  const beforeForced = h.measured();
+  h.run("updateLayout(true)");
+  assert.ok(h.measured() > beforeForced);
+});
+
+test("measuring the layouts keeps the panel's scroll position and the field being typed in", () => {
+  const room = { current: ROOM_16_9_WINDOW };
+  const h = layoutHarness(room);
+  const field = h.elements.get("filename");
+  const calls = [];
+  let focused = field;
+  Object.assign(field, {
+    selectionStart: 3, selectionEnd: 5, getClientRects: () => [{}],
+    focus() { calls.push("focus"); focused = field; },
+    setSelectionRange(from, to) { calls.push(`select ${from}-${to}`); }
+  });
+  h.panel.contains = (element) => element === field;
+  Object.defineProperty(h.run("document"), "activeElement", { get: () => focused });
+  // A compact class hides the fields, which takes the focus away and clamps the scrolling.
+  let className = "";
+  Object.defineProperty(h.layout, "className", {
+    get: () => className,
+    set(value) {
+      className = value;
+      if (value.includes("is-compact")) { focused = null; h.panel.scrollTop = 0; }
+    }
+  });
+  h.panel.scrollTop = 120;
+  h.run("updateLayout()");
+  assert.equal(h.layout.className, "layout is-stack");
+  assert.equal(h.panel.scrollTop, 120);
+  assert.deepEqual(calls, ["focus", "select 3-5"]);
+});
+
+test("the stream's aspect ratio sizes the video box, and spare width widens the side panel", async () => {
+  const room = { current: ROOM_16_9_WINDOW };
+  const h = layoutHarness(room);
+  await h.start();
+  await h.playerOutput('{"event":"video","width":1440,"height":1080,"sarNum":1,"sarDen":1}\n');
+  assert.equal(h.run("videoAspect"), 4 / 3);
+  assert.equal(h.layout.className, "layout is-side");
+  assert.equal(h.panel.style.width, "384px");
+  assert.deepEqual([h.host.width, h.host.height, h.host.left, h.host.top], ["896px", "672px", "0px", "24px"]);
+
+  // 4:3 in a 21:9 window: the side panel takes 136 px of the spare width, the rest is centered.
+  h.resize(ROOM_21_9_WINDOW);
+  assert.equal(h.panel.style.width, "520px");
+  assert.deepEqual([h.host.width, h.host.height, h.host.left, h.host.top], ["960px", "720px", "100px", "0px"]);
+
+  await h.run("stopOperation()");
+  assert.equal(h.run("videoAspect"), 4 / 3, "the last aspect ratio stays after the player stops");
+});
+
+test("a toggle while idle collapses the panel and the next stream decides again", async () => {
+  const room = { current: ROOM_21_9_WINDOW };
+  const h = layoutHarness(room);
+  h.run("updateLayout()");
+  h.toggle.click();
+  assert.equal(h.layout.className, "layout is-side is-compact");
+  await h.start();
+  await h.run("refreshState()");
+  assert.equal(h.layout.className, "layout is-side is-compact", "nothing changed automatically, so the choice stays");
+  h.toggle.click();
+  assert.equal(h.layout.className, "layout is-side");
+});
+
+test("a failed start leaves the idle layout", async () => {
+  const room = { current: ROOM_16_9_WINDOW };
+  const h = layoutHarness(room);
+  h.run("updateLayout()");
+  h.os.spawnProcess = async () => { throw new Error("spawn failed"); };
+  assert.equal((await h.start()).ok, false);
+  await h.run("refreshState()");
+  assert.equal(h.layout.className, "layout is-stack");
+  assert.equal(h.run("startingStream"), false);
+});
+
+test("without a player binary the panel is the whole window", () => {
+  const h = harness();
+  h.run("layoutReady = true; videoHost.hidden = true; updateLayout()");
+  assert.equal(h.elements.get("layout").className, "layout is-side no-video");
 });
 
 test("Windows RC statistics command reads a real TCP response and handles a closed port", { skip: process.platform !== "win32" }, async () => {

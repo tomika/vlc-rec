@@ -9,7 +9,7 @@ mkdir -p -m 700 "$XDG_RUNTIME_DIR"
 export NO_AT_BRIDGE=1 WEBKIT_DISABLE_SANDBOX_THIS_IS_DANGEROUS=1
 
 if [ "$KIND" = "x11" ]; then
-  Xvfb :99 -screen 0 1400x900x24 >/dev/null 2>&1 &
+  Xvfb :99 -screen 0 1920x1200x24 >/dev/null 2>&1 &
   export DISPLAY=:99
   sleep 1
   openbox >/dev/null 2>&1 &
@@ -18,7 +18,7 @@ else
   export WLR_BACKENDS=headless WLR_RENDERER=pixman WLR_LIBINPUT_NO_DEVICES=1 WLR_HEADLESS_OUTPUTS=1
   cat >/tmp/sway.cfg <<'EOF'
 xwayland enable
-output HEADLESS-1 resolution 1400x900
+output HEADLESS-1 resolution 1920x1200
 for_window [title="VLC Stream Recorder"] floating enable
 EOF
   sway -c /tmp/sway.cfg >/tmp/sway.log 2>&1 &

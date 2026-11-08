@@ -6,49 +6,249 @@
   --green: #27ae60;
   --mid: #64748b;
   --danger: #e74c3c;
+  --stage: #0e151c;
 }
 
 * {
   box-sizing: border-box;
 }
 
+html,
+body {
+  height: 100%;
+}
+
+/* The layout always fills the window exactly; only the panel scrolls. A scrolling
+   page would move the video window of the player out of step with the page. */
 body {
   margin: 0;
   font-family: "Segoe UI", Tahoma, sans-serif;
   background: radial-gradient(1200px 500px at 10% -30%, #3c5a74 0, var(--bg) 60%);
   color: var(--text);
-  overflow: auto;
+  overflow: hidden;
 }
 
-html {
-  overflow: auto;
-}
-
+/* ---- layout: app.js chooses is-side or is-stack, and is-compact ---- */
 .layout {
+  position: fixed;
+  inset: 0;
   display: flex;
-  min-height: 100vh;
 }
 
-.app {
-  flex: 0 0 440px;
+.layout.is-stack {
+  flex-direction: column;
+}
+
+.panel {
+  flex: 0 0 auto;
+  min-width: 0;
+  min-height: 0;
+  overflow: auto;
   padding: 16px;
 }
 
-/* The native video window of vlc-rec-player is placed exactly over this element. */
+/* app.js widens the side panel up to SIDE_PANEL_MAX_WIDTH when the video leaves room. */
+.layout.is-side .panel {
+  width: 384px;
+}
+
+.stage {
+  position: relative;
+  flex: 1 1 0;
+  min-width: 0;
+  min-height: 0;
+  overflow: hidden;
+  background: var(--stage);
+}
+
+.layout.is-stack .stage {
+  order: -1;
+}
+
+/* app.js sizes and centers this box to the aspect ratio of the stream. */
 .video-host {
-  flex: 1 1 320px;
-  min-width: 320px;
-  margin: 16px 16px 16px 0;
+  position: absolute;
+  left: 0;
+  top: 0;
+  width: 100%;
+  height: 100%;
   display: flex;
   align-items: center;
   justify-content: center;
   background: #000;
   color: #7f8c8d;
   font-size: 13px;
+  overflow: hidden;
 }
 
-.video-host[hidden] {
+.video-host[hidden],
+.layout.no-video .stage,
+.layout.no-video .btn-toggle {
   display: none;
+}
+
+/* macOS and ARM Linux: VLC opens its own window, so the panel is all there is. */
+.layout.no-video .panel {
+  flex: 1 1 auto;
+  width: auto;
+  max-width: 640px;
+  margin: 0 auto;
+}
+
+/* Below the video: the fields side by side, the controls in one row. */
+.layout.is-stack .panel {
+  display: grid;
+  grid-template-columns: repeat(3, minmax(0, 1fr));
+  grid-template-areas:
+    "ip folder file"
+    "options info buttons"
+    "status status status";
+  column-gap: 16px;
+  align-items: center;
+  align-content: start;
+  padding: 4px 16px 10px;
+}
+
+@media (max-width: 1039px) {
+  .layout.is-stack .panel {
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+    grid-template-areas:
+      "ip folder"
+      "file options"
+      "info buttons"
+      "status status";
+  }
+}
+
+@media (max-width: 719px) {
+  .layout.is-stack .panel {
+    grid-template-columns: minmax(0, 1fr);
+    grid-template-areas: "ip" "folder" "file" "options" "info" "buttons" "status";
+  }
+}
+
+.field-ip { grid-area: ip; }
+.field-folder { grid-area: folder; }
+.field-file { grid-area: file; }
+.reconnect-option { grid-area: options; }
+.info-row { grid-area: info; }
+.button-row { grid-area: buttons; }
+.status { grid-area: status; }
+
+.layout.is-stack .field {
+  align-self: end;
+}
+
+/* One line, so that a long message cannot change the height of the video. */
+.layout.is-stack .status {
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  margin-top: 8px;
+}
+
+/* ---- compact: only the essentials, the rest of the window is video ---- */
+.layout.is-compact .field,
+.layout.is-compact .reconnect-option,
+.layout.is-compact .info-label {
+  display: none;
+}
+
+.layout.is-compact .info-row,
+.layout.is-compact .button-row,
+.layout.is-compact .status {
+  margin: 0;
+}
+
+.layout.is-compact .btn {
+  padding: 8px 12px;
+}
+
+.layout.is-compact .info-row {
+  gap: 12px;
+  font-variant-numeric: tabular-nums;
+}
+
+.layout.is-compact .mode-badge {
+  order: -2;
+}
+
+/* Only a recording has a file size worth the room. */
+.layout.is-compact:not([data-mode="recording"]) .info-size {
+  display: none;
+}
+
+.layout.is-compact .info-time {
+  order: -1;
+}
+
+/* A bar below the video. */
+.layout.is-stack.is-compact .panel {
+  grid-template-columns: auto minmax(0, 1fr) auto;
+  grid-template-areas: "info status buttons";
+  column-gap: 14px;
+  padding: 6px 10px;
+}
+
+.layout.is-stack.is-compact .button-row .btn:not(.btn-toggle) {
+  flex: 0 0 auto;
+  min-width: 96px;
+}
+
+/* A strip beside the video. */
+.layout.is-side.is-compact .panel {
+  width: 172px;
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+  padding: 12px 10px;
+}
+
+.layout.is-side.is-compact .info-row {
+  flex-direction: column;
+  align-items: flex-start;
+  gap: 6px;
+}
+
+.layout.is-side.is-compact .button-row {
+  flex-direction: column;
+  gap: 8px;
+}
+
+.layout.is-side.is-compact .button-row .btn {
+  flex: 0 0 auto;
+}
+
+.layout.is-side.is-compact .button-row .btn-toggle {
+  width: auto;
+  height: 34px;
+}
+
+.layout.is-side.is-compact .status {
+  font-size: 12px;
+  min-height: 0;
+}
+
+/* app.js adds short-labels when a full label would not fit on one line. */
+.btn-label-full,
+.btn-label-short {
+  white-space: nowrap;
+}
+
+.btn-label-short,
+.layout.is-compact .btn-label-full,
+.panel.short-labels .btn-label-full {
+  display: none;
+}
+
+.layout.is-compact .btn-label-short,
+.panel.short-labels .btn-label-short {
+  display: inline;
+}
+
+.video-placeholder {
+  padding: 8px;
+  text-align: center;
 }
 
 .field-label {
@@ -124,14 +324,76 @@ html {
 .info-row {
   margin-top: 12px;
   display: flex;
-  gap: 20px;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 6px 20px;
   font-size: 14px;
+}
+
+.info-item {
+  white-space: nowrap;
+}
+
+.mode-badge {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  padding: 2px 8px;
+  border-radius: 999px;
+  font-size: 11px;
+  font-weight: 700;
+  letter-spacing: 0.06em;
+  white-space: nowrap;
+}
+
+.mode-badge::before {
+  content: "";
+  width: 8px;
+  height: 8px;
+  border-radius: 50%;
+  background: currentColor;
+}
+
+/* The full panel has the Stop button's label; the badge is for the compact controls. */
+.mode-badge[hidden],
+.layout:not(.is-compact) .mode-badge {
+  display: none;
+}
+
+.mode-badge.is-recording {
+  color: #ff7b6e;
+  background: rgba(231, 76, 60, 0.18);
+}
+
+.mode-badge.is-recording::before {
+  animation: rec-blink 1.4s ease-in-out infinite;
+}
+
+.mode-badge.is-preview {
+  color: #4cd38a;
+  background: rgba(39, 174, 96, 0.18);
+}
+
+@keyframes rec-blink {
+  50% { opacity: 0.25; }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .mode-badge.is-recording::before {
+    animation: none;
+  }
 }
 
 .button-row {
   margin-top: 18px;
   display: flex;
   gap: 10px;
+}
+
+.layout.is-stack:not(.is-compact) .info-row,
+.layout.is-stack:not(.is-compact) .button-row,
+.layout.is-stack:not(.is-compact) .reconnect-option {
+  margin-top: 10px;
 }
 
 .btn {
@@ -143,9 +405,40 @@ html {
   cursor: pointer;
 }
 
+.btn:focus-visible {
+  outline: 2px solid #8cc8f0;
+  outline-offset: 2px;
+}
+
 .button-row .btn,
 .scan-actions .btn {
   flex: 1;
+}
+
+/* Buttons share the row equally; a label that does not fit shows as overflow,
+   which app.js detects. */
+.button-row .btn {
+  min-width: 0;
+  overflow: hidden;
+}
+
+.button-row .btn-toggle {
+  flex: 0 0 40px;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  padding: 0;
+  background: #3b5168;
+  color: #d5dee6;
+}
+
+.button-row .btn-toggle:hover {
+  background: #46607a;
+}
+
+.button-row .btn-toggle[aria-expanded="true"] {
+  background: #4f6d8a;
+  color: #fff;
 }
 
 .row .btn {
