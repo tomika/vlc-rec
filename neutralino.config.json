@@ -2,7 +2,7 @@
   "$schema": "https://raw.githubusercontent.com/neutralinojs/neutralinojs/main/schemas/neutralino.config.schema.json",
   "applicationId": "io.tomika.vlcrec",
   "applicationIcon": "assets/vlc-rec.png",
-  "version": "0.1.0",
+  "version": "0.2.0",
   "defaultMode": "window",
   "port": 0,
   "documentRoot": "/src/frontend/",
