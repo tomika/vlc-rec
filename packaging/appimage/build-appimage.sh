@@ -42,6 +42,8 @@ mkdir -p "$USR/bin" "$USR/player" "$LIB/x86_64-linux-gnu" "$LIB/vlc" "$LIB/gtk-3
 
 cp "$REPO/dist/vlc-rec/vlc-rec-linux_x64" "$USR/bin/vlc-rec"
 cp "$REPO/player/vlc-rec-player-linux_x64" "$USR/player/"
+# Optional camera control (OSC); the app has no camera buttons without it.
+if [ -f "$REPO/player/vlc-rec-camera-linux_x64" ]; then cp "$REPO/player/vlc-rec-camera-linux_x64" "$USR/player/"; fi
 cp /usr/bin/vlc /usr/bin/zenity "$USR/bin/"
 cp -rL "$SYSTEM_LIB/vlc/plugins" "$LIB/vlc/plugins"
 cp -rL "$SYSTEM_LIB/gdk-pixbuf-2.0/2.10.0/loaders" "$LIB/gdk-pixbuf-loaders"

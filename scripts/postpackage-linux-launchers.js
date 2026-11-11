@@ -75,13 +75,16 @@ async function buildLinuxLauncherBundles() {
     await fs.mkdir(bundleDir, { recursive: true });
     await fs.copyFile(binarySrc, binaryDst);
 
-    const playerName = `vlc-rec-player-linux_${arch}`;
-    const playerSrc = path.join(DIST_DIR, "player", playerName);
-    if (await pathExists(playerSrc)) {
-      const playerDst = path.join(bundleDir, "player", playerName);
-      await fs.mkdir(path.dirname(playerDst), { recursive: true });
-      await fs.copyFile(playerSrc, playerDst);
-      await fs.chmod(playerDst, 0o755);
+    // The player, and the optional camera helper (OSC camera control).
+    for (const helper of ["vlc-rec-player", "vlc-rec-camera"]) {
+      const helperName = `${helper}-linux_${arch}`;
+      const helperSrc = path.join(DIST_DIR, "player", helperName);
+      if (await pathExists(helperSrc)) {
+        const helperDst = path.join(bundleDir, "player", helperName);
+        await fs.mkdir(path.dirname(helperDst), { recursive: true });
+        await fs.copyFile(helperSrc, helperDst);
+        await fs.chmod(helperDst, 0o755);
+      }
     }
     await fs.copyFile(ICON_SRC, iconDst);
     await fs.writeFile(launcherDst, launcherScriptText(), "utf8");

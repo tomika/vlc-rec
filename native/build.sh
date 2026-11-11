@@ -8,6 +8,13 @@ x86_64-w64-mingw32-gcc -std=gnu11 -O2 -s -Wall -Wextra -static -o player/vlc-rec
   native/vlc-rec-player.c -ladvapi32 -lgdi32
 chmod 755 player/vlc-rec-player-linux_x64
 
+# Camera helper (OSC over UDP), optional; the app has no camera controls without it.
+gcc -std=gnu11 -O2 -s -Wall -Wextra -o player/vlc-rec-camera-linux_x64 \
+  native/vlc-rec-camera.c -lm
+x86_64-w64-mingw32-gcc -std=gnu11 -O2 -s -Wall -Wextra -static -o player/vlc-rec-camera-win_x64.exe \
+  native/vlc-rec-camera.c -lws2_32 -lm
+chmod 755 player/vlc-rec-camera-linux_x64
+
 # Test double for libVLC; never shipped.
 mkdir -p tests/fixtures/stub/win tests/fixtures/stub/linux
 x86_64-w64-mingw32-gcc -std=gnu11 -O2 -Wall -Wextra -shared -static-libgcc \
