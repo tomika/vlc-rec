@@ -39,6 +39,9 @@ const bufferApplyBtn = document.getElementById("bufferApplyBtn");
 const cameraPage = document.getElementById("cameraPage");
 const cameraAddressText = document.getElementById("cameraAddressText");
 const cameraPageBtn = document.getElementById("cameraPageBtn");
+const cameraHintText = document.getElementById("cameraHint");
+const cameraZoomItem = document.getElementById("cameraZoomItem");
+const cameraSpeedItem = document.getElementById("cameraSpeedItem");
 
 const DEFAULT_PARAMS = {
   ip_address: "127.0.0.1:5000",
@@ -49,19 +52,15 @@ const DEFAULT_PARAMS = {
   scan_timeout_ms: 300,
   auto_reconnect: false,
   stall_timeout_sec: 15,
-  // Optional camera control (OBSBOT Tail 2 over OSC). Empty camera_ip: no camera controls.
-  camera_ip: "",
-  // How far a click on the picture turns the camera depends on these, measured on a Tail 2:
-  // horizontal field of view at zoom 0, the top of its zoom range (the camera stops there
-  // whatever it is asked for) and the zoom ratio at the top.
-  camera_hfov_deg: 76,
-  camera_zoom_max: 36,
-  camera_zoom_ratio: 4.6,
-  // Degrees per second of a turn after a click (the speed value is about that); the slider
-  // next to the zoom buttons changes it. The arrow keys have a fixed speed of their own.
+  // Optional camera control through an adapter (plugins/<id>/, docs/camera-plugin-interface.md).
+  // camera_plugin is the id of the adapter ("" switches the feature off) and camera_config what its
+  // manifest asks for (the address of the camera, ...). camera_turn_speed is the speed of a turn after
+  // a click in degrees per second; the slider next to the zoom buttons changes it. The zoom step is a
+  // percent of the zoom range, the arrow key step is in degrees.
+  camera_plugin: "",
+  camera_config: {},
   camera_turn_speed: 10,
-  camera_arrow_speed: 30,
-  camera_zoom_step: 4,
+  camera_zoom_step: 10,
   camera_arrow_step_deg: 2,
   // VLC's own network caching (1000 ms) delays the picture by about that much. How small it can be
   // depends on the network and the computer: with the 4K stream of a Tail 2 over a LAN and software
@@ -152,7 +151,7 @@ let layoutStageSize = "";
 let startingStream = false;
 // "", "full" or "compact": a choice made with the toggle button.
 let panelOverride = "";
-// The camera helper process, or null; and a short message about it shown with the status.
+// The camera adapter process, or null; and a short message about it shown with the status.
 let cameraProc = null;
 let cameraNote = "";
 let cameraNoteUntil = 0;
@@ -551,11 +550,36 @@ async function pathExists(path) {
   }
 }
 
+// Earlier builds named an OBSBOT camera by camera_ip and kept its tuning in camera_* keys of their own.
+// Those became the config of the obsbot-tail2 adapter; the zoom step was in the camera's units and is now
+// a percent of the zoom range.
+function migrateCameraSettings(loaded) {
+  if (!loaded || typeof loaded !== "object" || !Object.prototype.hasOwnProperty.call(loaded, "camera_ip")) return loaded;
+  const out = { ...loaded };
+  const host = String(out.camera_ip || "").trim();
+  const zoomMax = numberParam(out.camera_zoom_max, 36, 1, 100);
+  if (host && !out.camera_plugin) {
+    out.camera_plugin = "obsbot-tail2";
+    out.camera_config = {
+      host,
+      hfov: numberParam(out.camera_hfov_deg, 76, 10, 170),
+      zoomRatio: numberParam(out.camera_zoom_ratio, 4.6, 1, 100),
+      zoomMax,
+      nudgeSpeed: numberParam(out.camera_arrow_speed, 30, 1, 90)
+    };
+  }
+  if (out.camera_zoom_step !== undefined) {
+    out.camera_zoom_step = Math.min(50, Math.max(1, Math.round(numberParam(out.camera_zoom_step, 4, 1, 100) * 100 / zoomMax)));
+  }
+  for (const key of ["camera_ip", "camera_hfov_deg", "camera_zoom_max", "camera_zoom_ratio", "camera_arrow_speed"]) delete out[key];
+  return out;
+}
+
 async function loadParams() {
   try {
     if (await pathExists(PARAMS_FILE)) {
       const raw = await Neutralino.filesystem.readFile(PARAMS_FILE);
-      parameters = { ...parameters, ...JSON.parse(raw) };
+      parameters = { ...parameters, ...migrateCameraSettings(JSON.parse(raw)) };
     }
   } catch {
     parameters = { ...DEFAULT_PARAMS };
@@ -960,13 +984,10 @@ async function applySelectedAddress(addressPort) {
   ip.value = addressPort;
   parameters.ip_address = addressPort;
   setStatus(`Selected stream endpoint: ${addressPort}`);
-  // The camera helper follows the address (saved with the settings below).
-  const host = parseAddressPort(addressPort).host;
-  const cameraHost = isValidIPv4(host) && host !== String(parameters.camera_ip || "").trim() ? host : "";
-  if (cameraHost) {
-    parameters.camera_ip = cameraHost;
-    showCameraPage();
-  }
+  // The camera follows the address of the stream (saved with the settings below), when its adapter
+  // takes an address.
+  const cameraHost = await cameraHostFor(parseAddressPort(addressPort).host);
+  if (cameraHost) parameters.camera_config = { ...(parameters.camera_config || {}), host: cameraHost };
 
   try {
     await saveParams(addressPort, outPath.value.trim(), currentOutputFilenameFromUI());
@@ -975,8 +996,19 @@ async function applySelectedAddress(addressPort) {
   }
   if (cameraHost) {
     setCameraNote(`address set to ${cameraHost}.`);
-    await restartCamera().catch((err) => logDebug(`Camera helper: ${normalizeError(err)}`));
+    await restartCamera().catch((err) => logDebug(`Camera adapter: ${normalizeError(err)}`));
   }
+}
+
+// The address to give the camera adapter for the host of a stream, or "" when the camera stays as it is:
+// no adapter chosen, not an IPv4 address, the same address, or an adapter that takes no host.
+async function cameraHostFor(host) {
+  const id = String(parameters.camera_plugin || "").trim();
+  if (!id || !isValidIPv4(host)) return "";
+  const current = parameters.camera_config && parameters.camera_config.host;
+  if (host === current) return "";
+  const found = await findPlugin(id);
+  return found && manifestFields(found.manifest).some((field) => field.key === "host") ? host : "";
 }
 
 async function startScan() {
@@ -1108,34 +1140,88 @@ async function findPlayerBinary() {
 }
 
 // ---- optional camera control ----
-// vlc-rec-camera (native/vlc-rec-camera.c) speaks OSC to the camera; the frontend has no
-// socket API, so it talks to that helper through stdin and stdout, as it does with the player.
+// A camera adapter (plugins/<id>/, described in docs/camera-plugin-interface.md) is a separate program
+// that speaks the camera's own protocol. The frontend has no socket API, so the app talks to it through
+// stdin and stdout, one JSON object per line, as it does with the player. The adapter says what the
+// camera can do (its capabilities), and the controls follow that.
+
+const CAMERA_INTERFACE = 1;
+const CAMERA_REQUEST_TIMEOUT_MS = 3000;
+// The first start of a program that is new on the machine can take ten seconds or more on Windows (the answer
+// to hello came after 10.5 s in a log), so the wait for hello is long. Later requests are quick.
+const CAMERA_START_TIMEOUT_MS = 30000;
+const CAMERA_CONNECT_TIMEOUT_MS = 6000;
+const CAMERA_RETRY_MS = 5000;
+const PLUGIN_ID_PATTERN = /^[a-z0-9][a-z0-9_-]{0,39}$/;
 
 function numberParam(value, fallback, min, max) {
   const number = Number(value);
   return Number.isFinite(number) && number >= min && number <= max ? number : fallback;
 }
 
-function cameraAddress() {
-  const address = String(parameters.camera_ip || "").trim();
-  return isValidIPv4(address) ? address : "";
-}
-
 function cameraActive() {
   return Boolean(cameraProc && !cameraProc.exited);
 }
 
+// What the connected camera can do, as the adapter declared it; null while there is no camera.
+function cameraCaps() {
+  return cameraActive() && cameraProc.caps ? cameraProc.caps : null;
+}
+
+function cameraCan(feature) {
+  const caps = cameraCaps();
+  if (!caps) return false;
+  const ptz = caps.ptz && typeof caps.ptz === "object" ? caps.ptz : {};
+  switch (feature) {
+    case "centerOn": return Boolean(ptz.centerOn);
+    case "nudge": return Boolean(ptz.nudge);
+    case "speed": return Boolean(ptz.speed && typeof ptz.speed === "object");
+    case "zoom": return Boolean(caps.zoom && caps.zoom.by);
+    default: return false;
+  }
+}
+
+// The range of the turning speed slider, in the unit the adapter declares (degrees per second).
+function cameraSpeedRange() {
+  const caps = cameraCaps();
+  const speed = caps && caps.ptz && caps.ptz.speed;
+  const min = Number(speed && speed.min);
+  const max = Number(speed && speed.max);
+  return Number.isFinite(min) && Number.isFinite(max) && min >= 1 && max > min
+    ? { min: Math.ceil(min), max: Math.floor(max) }
+    : { min: 1, max: 90 };
+}
+
 // The camera's own control page (where, for example, the SD card can be formatted) opens in the web
-// browser of the system: it needs no more than the address of the camera.
+// browser of the system. The address comes from the adapter, so only a plain http or https one is used.
 function cameraPageUrl() {
-  const address = cameraAddress();
-  return address ? `http://${address}/` : "";
+  const caps = cameraCaps();
+  const url = String((caps && caps.webPage && caps.webPage.url) || "").trim();
+  return /^https?:\/\/[^\s"'<>`]+$/.test(url) ? url : "";
+}
+
+function cameraLabel() {
+  const caps = cameraCaps();
+  const device = caps && caps.device && typeof caps.device === "object" ? caps.device : {};
+  return [device.model, device.address].filter((part) => typeof part === "string" && part).join(" ");
+}
+
+function cameraHint() {
+  const parts = [];
+  if (cameraCan("centerOn")) parts.push("Click the picture to centre it.");
+  if (cameraCan("zoom")) parts.push("Mouse wheel: zoom.");
+  if (cameraCan("nudge")) parts.push("Arrow keys: turn (Shift: larger steps).");
+  return parts.join(" ");
 }
 
 function showCameraPage() {
-  const address = cameraAddress();
-  cameraPage.hidden = !address;
-  cameraAddressText.textContent = address;
+  const hint = cameraHint();
+  const label = cameraLabel();
+  const url = cameraPageUrl();
+  cameraPage.hidden = !(cameraCaps() && (hint || label || url));
+  cameraAddressText.textContent = label;
+  cameraPageBtn.hidden = !url;
+  cameraHintText.textContent = hint;
 }
 
 async function openCameraPage() {
@@ -1159,48 +1245,203 @@ function withCameraNote(text) {
   return text ? `${text} Camera: ${cameraNote}` : `Camera: ${cameraNote}`;
 }
 
+// ---- finding an adapter ----
+
+// The folders adapters are looked for in, first match wins: VLC_REC_PLUGIN_DIR, the plugins folder of the
+// settings (where a user installs one), and the plugins folder beside the player (what the app ships with).
+async function pluginSearchDirs() {
+  const dirs = [];
+  const own = await Neutralino.os.getEnv("VLC_REC_PLUGIN_DIR");
+  if (own) dirs.push(own);
+  dirs.push(`${NL_PATH}/plugins`);
+  const playerDir = await Neutralino.os.getEnv("VLC_REC_PLAYER_DIR") || `${NL_PATH}/player`;
+  dirs.push(`${playerDir}/plugins`);
+  return dirs;
+}
+
+// The program to start and its arguments, from the manifest: the entry for this system and architecture
+// (win_x64), then for this system (win), then "default". The program is a path inside the adapter's folder.
+function pluginCommand(manifest) {
+  const platform = NL_OS === "Windows" ? "win" : NL_OS === "Linux" ? "linux" : NL_OS === "Darwin" ? "mac" : "";
+  const table = manifest && typeof manifest.command === "object" && manifest.command ? manifest.command : {};
+  const argv = table[`${platform}_${NL_ARCH}`] || table[platform] || table.default;
+  if (!Array.isArray(argv) || !argv.length || !argv.every((item) => typeof item === "string" && item)) return null;
+  const program = argv[0].replace(/^\.\//, "");
+  if (/^[a-zA-Z]:|^[\\/]|\.\.|\\/.test(program)) return null;
+  return [program, ...argv.slice(1)];
+}
+
+// { dir, manifest, argv } of the adapter with this id, or null.
+async function findPlugin(id) {
+  if (!PLUGIN_ID_PATTERN.test(id)) return null;
+  for (const base of await pluginSearchDirs()) {
+    const dir = `${base}/${id}`;
+    const manifestPath = `${dir}/plugin.json`;
+    if (!await pathExists(manifestPath)) continue;
+    let manifest;
+    try {
+      manifest = JSON.parse(await Neutralino.filesystem.readFile(manifestPath));
+    } catch (err) {
+      logDebug(`${manifestPath} could not be read: ${normalizeError(err)}`);
+      continue;
+    }
+    if (!manifest || manifest.id !== id || manifest.interface !== CAMERA_INTERFACE) {
+      logDebug(`${manifestPath} is not an adapter '${id}' of interface ${CAMERA_INTERFACE}.`);
+      continue;
+    }
+    const argv = pluginCommand(manifest);
+    if (!argv || !await pathExists(`${dir}/${argv[0]}`)) {
+      logDebug(`The adapter '${id}' has no program for this system (${NL_OS} ${NL_ARCH}).`);
+      continue;
+    }
+    return { dir, manifest, argv };
+  }
+  return null;
+}
+
+function manifestFields(manifest) {
+  return manifest && Array.isArray(manifest.config) ? manifest.config.filter((field) => field && typeof field.key === "string") : [];
+}
+
+// The config sent with connect: the fields the manifest declares, from the settings, else their defaults.
+function cameraConfigFor(manifest) {
+  const saved = parameters.camera_config && typeof parameters.camera_config === "object" ? parameters.camera_config : {};
+  const config = {};
+  for (const field of manifestFields(manifest)) {
+    const value = saved[field.key] !== undefined ? saved[field.key] : field.default;
+    if (value === undefined || value === null) continue;
+    if (field.type === "int" || field.type === "number") {
+      const number = Number(value);
+      if (Number.isFinite(number)) config[field.key] = number;
+      else if (Number.isFinite(Number(field.default))) config[field.key] = Number(field.default);
+    } else if (field.type === "bool") {
+      config[field.key] = value === true || value === "true";
+    } else {
+      config[field.key] = String(value);
+    }
+  }
+  return config;
+}
+
+// ---- talking to it ----
+
+function cameraError(code, message) {
+  return Object.assign(new Error(message), { code });
+}
+
+// One request, one answer. Rejects with the adapter's error (code and message) or with a timeout.
+function cameraRequest(proc, method, params = {}, timeoutMs = CAMERA_REQUEST_TIMEOUT_MS) {
+  return new Promise((resolve, reject) => {
+    if (!proc || proc.exited) {
+      reject(cameraError("not_connected", "the camera adapter is not running."));
+      return;
+    }
+    const id = proc.nextId++;
+    const timer = setTimeout(() => {
+      proc.pending.delete(id);
+      reject(cameraError("timeout", `the camera adapter did not answer ${method}.`));
+    }, timeoutMs);
+    proc.pending.set(id, { resolve, reject, timer });
+    Neutralino.os.updateSpawnedProcess(proc.id, "stdIn", `${JSON.stringify({ id, method, params })}\n`).catch(() => {
+      clearTimeout(timer);
+      proc.pending.delete(id);
+      reject(cameraError("not_connected", "the camera adapter is not running."));
+    });
+  });
+}
+
+// A request from a control: the answer matters only when it is an error.
+function sendCameraRequest(method, params) {
+  const proc = cameraProc;
+  if (!proc || proc.exited || !proc.caps) return false;
+  // An adapter that is stopped on purpose (a restart) leaves requests unanswered; that is not worth a note.
+  cameraRequest(proc, method, params).catch((err) => { if (err.code !== "stopped") setCameraNote(err.message); });
+  return true;
+}
+
+function failPendingCameraRequests(proc) {
+  for (const entry of proc.pending.values()) {
+    clearTimeout(entry.timer);
+    entry.reject(cameraError("stopped", "the camera adapter stopped."));
+  }
+  proc.pending.clear();
+}
+
 async function startCamera() {
   if (cameraProc) return;
-  const address = String(parameters.camera_ip || "").trim();
-  if (!address) return;
-  if (!cameraAddress()) {
-    logDebug(`camera_ip '${address}' is not an IPv4 address; camera controls are off.`);
+  const id = String(parameters.camera_plugin || "").trim();
+  if (!id) return;
+  const found = await findPlugin(id);
+  if (!found) {
+    logDebug(`The camera adapter '${id}' was not found; camera controls are off.`);
+    setCameraNote(`the camera adapter '${id}' was not found.`);
     return;
   }
-  const binary = await findHelperBinary("vlc-rec-camera");
-  if (!binary) {
-    logDebug("The camera helper was not found; camera controls are off.");
+  const command = buildCommand(`${found.dir}/${found.argv[0]}`, found.argv.slice(1));
+  logDebug(`Starting the camera adapter: ${command}`);
+  const info = await Neutralino.os.spawnProcess(command, { cwd: found.dir });
+  const proc = { id: info.id, lineBuffer: "", exited: false, plugin: found, nextId: 1, pending: new Map(), caps: null };
+  cameraProc = proc;
+  connectCamera(proc).catch((err) => logDebug(`Camera adapter: ${normalizeError(err)}`));
+}
+
+// hello, then connect until the camera answers: it may be switched on after the app. The adapter
+// answers connect with the capabilities.
+async function connectCamera(proc) {
+  try {
+    await cameraRequest(proc, "hello", { interface: CAMERA_INTERFACE, app: "vlc-rec" }, CAMERA_START_TIMEOUT_MS);
+  } catch (err) {
+    if (!proc.exited) setCameraNote(`the camera adapter does not take part: ${err.message}`);
     return;
   }
-  const command = buildCommand(binary, [
-    "--ip", address,
-    "--hfov", String(numberParam(parameters.camera_hfov_deg, DEFAULT_PARAMS.camera_hfov_deg, 10, 170)),
-    "--zoom-ratio", String(numberParam(parameters.camera_zoom_ratio, DEFAULT_PARAMS.camera_zoom_ratio, 1, 100)),
-    "--zoom-max", String(Math.round(numberParam(parameters.camera_zoom_max, DEFAULT_PARAMS.camera_zoom_max, 1, 100))),
-    "--speed", String(cameraTurnSpeed()),
-    "--nudge-speed", String(Math.round(numberParam(parameters.camera_arrow_speed, DEFAULT_PARAMS.camera_arrow_speed, 1, 90)))
-  ]);
-  logDebug(`Starting the camera helper: ${command}`);
-  const info = await Neutralino.os.spawnProcess(command);
-  cameraProc = { id: info.id, lineBuffer: "", exited: false };
-  showCameraSpeed();
-  showCameraControls(true);
+  while (cameraProc === proc && !proc.exited && !proc.stopping) {
+    try {
+      const result = await cameraRequest(proc, "connect", { config: cameraConfigFor(proc.plugin.manifest) }, CAMERA_CONNECT_TIMEOUT_MS);
+      applyCameraCapabilities(proc, result.capabilities);
+      return;
+    } catch (err) {
+      if (proc.exited || proc.stopping) return;
+      setCameraNote(err.message);
+      // The settings are wrong: asking again does not help.
+      if (err.code === "invalid_params") return;
+      await new Promise((resolve) => setTimeout(resolve, CAMERA_RETRY_MS));
+    }
+  }
+}
+
+function applyCameraCapabilities(proc, caps) {
+  proc.caps = caps && typeof caps === "object" ? caps : {};
+  showCameraControls();
+  // The speed is the app's setting, not the adapter's.
+  if (cameraCan("speed")) sendCameraRequest("ptz.setSpeed", { value: cameraTurnSpeed() });
 }
 
 // The panel is arranged differently with the camera controls, so a change arranges it again.
-function showCameraControls(visible) {
-  cameraBar.hidden = !visible;
-  layoutEl.dataset.camera = visible ? "on" : "off";
+function showCameraControls() {
+  const zoom = cameraCan("zoom");
+  const speed = cameraCan("speed");
+  cameraZoomItem.hidden = !zoom;
+  cameraSpeedItem.hidden = !speed;
+  cameraBar.hidden = !(zoom || speed);
+  layoutEl.dataset.camera = cameraBar.hidden ? "off" : "on";
+  if (speed) {
+    const range = cameraSpeedRange();
+    cameraSpeed.min = String(range.min);
+    cameraSpeed.max = String(range.max);
+    showCameraSpeed();
+  }
+  showCameraPage();
   updateLayout();
 }
 
 function stopCamera() {
   const proc = cameraProc;
   if (!proc || proc.exited) return;
-  Neutralino.os.updateSpawnedProcess(proc.id, "stdIn", "STOP\n").catch(() => {});
+  proc.stopping = true;
+  Neutralino.os.updateSpawnedProcess(proc.id, "stdIn", `${JSON.stringify({ id: 0, method: "shutdown" })}\n`).catch(() => {});
 }
 
-// Stops the helper, waits until it is gone (it holds the port the camera answers to), starts it
+// Stops the adapter, waits until it is gone (it may hold a port the camera answers to), starts it
 // again with the current settings.
 async function restartCamera() {
   const proc = cameraProc;
@@ -1211,30 +1452,34 @@ async function restartCamera() {
     if (cameraProc === proc) {
       Neutralino.os.updateSpawnedProcess(proc.id, "exit").catch(() => {});
       proc.exited = true;
+      failPendingCameraRequests(proc);
       cameraProc = null;
+      showCameraControls();
     }
   }
   await startCamera();
 }
 
 function cameraTurnSpeed() {
-  return Math.round(numberParam(parameters.camera_turn_speed, DEFAULT_PARAMS.camera_turn_speed, 1, 90));
+  const range = cameraSpeedRange();
+  return Math.round(numberParam(parameters.camera_turn_speed, DEFAULT_PARAMS.camera_turn_speed, range.min, range.max));
 }
 
 function showCameraSpeedValue(speed) {
   cameraSpeedValue.textContent = `${speed} °/s`;
 }
 
-// The slider takes whole degrees per second, 1 to 90, as the setting does.
 function showCameraSpeed() {
   const current = cameraTurnSpeed();
   cameraSpeed.value = String(current);
   showCameraSpeedValue(current);
 }
 
+// A whole speed within the range the adapter declares, or 0.
 function sliderSpeed() {
+  const range = cameraSpeedRange();
   const speed = Math.round(Number(cameraSpeed.value));
-  return speed >= 1 && speed <= 90 ? speed : 0;
+  return speed >= range.min && speed <= range.max ? speed : 0;
 }
 
 // While the slider is dragged: only the number next to it follows.
@@ -1243,13 +1488,13 @@ function handleCameraSpeedInput() {
   if (speed) showCameraSpeedValue(speed);
 }
 
-// When it is let go: the helper and the settings file get the new speed.
+// When it is let go: the adapter and the settings file get the new speed.
 function handleCameraSpeedChange() {
   const speed = sliderSpeed();
   if (!speed) return;
   showCameraSpeedValue(speed);
   parameters.camera_turn_speed = speed;
-  sendCameraCommand(`SPEED ${speed}`);
+  sendCameraRequest("ptz.setSpeed", { value: speed });
   saveParams(parameters.ip_address, parameters.output_path, parameters.output_filename).catch(() => {});
 }
 
@@ -1257,22 +1502,41 @@ function handleCameraSpeedChange() {
 // picture: the next click waits until the turn is over (it starts after a moment) and the picture
 // has caught up.
 function extendCameraBusy(turn) {
-  // The helper reports how long the turn takes; older helpers do not, then it follows from the speed.
+  // The adapter reports how long the turn takes; without it the duration follows from the speed.
   const degrees = Math.max(Math.abs(turn.toPan - turn.fromPan), Math.abs(turn.toTilt - turn.fromTilt));
   const turnMs = Number.isFinite(turn.durationMs) ? turn.durationMs : degrees / cameraTurnSpeed() * 1000;
   cameraBusyUntil = Math.max(cameraBusyUntil, Date.now() + CAMERA_TURN_START_MS + turnMs + CAMERA_PICTURE_LAG_MS);
 }
 
-function sendCameraCommand(line) {
-  if (!cameraActive()) return false;
-  Neutralino.os.updateSpawnedProcess(cameraProc.id, "stdIn", `${line}\n`).catch(() => {});
-  return true;
+function handleCameraMessage(proc, message) {
+  if (message.id !== undefined && message.id !== null) {
+    const entry = proc.pending.get(message.id);
+    if (!entry) return;
+    proc.pending.delete(message.id);
+    clearTimeout(entry.timer);
+    if (message.error) {
+      entry.reject(cameraError(String(message.error.code || "device_error"), String(message.error.message || message.error.code || "error")));
+    } else {
+      entry.resolve(message.result && typeof message.result === "object" ? message.result : {});
+    }
+    return;
+  }
+  if (message.event === "turned" && message.moved) extendCameraBusy(message);
+  if (message.event === "error") setCameraNote(String(message.message || message.code || "error"));
+  if (message.event === "capabilities") applyCameraCapabilities(proc, message.capabilities);
+  if (message.event === "state" && (message.state === "lost" || message.state === "error")) {
+    // The camera is gone; the controls go until the adapter says it is back (a capabilities event).
+    proc.caps = null;
+    showCameraControls();
+    setCameraNote(String(message.reason || "the camera is not reachable."));
+  }
 }
 
 function handleCameraOutput(chunk) {
-  cameraProc.lineBuffer += chunk;
-  const lines = cameraProc.lineBuffer.split("\n");
-  cameraProc.lineBuffer = lines.pop();
+  const proc = cameraProc;
+  proc.lineBuffer += chunk;
+  const lines = proc.lineBuffer.split("\n");
+  proc.lineBuffer = lines.pop();
   for (const line of lines) {
     let message;
     try {
@@ -1280,10 +1544,9 @@ function handleCameraOutput(chunk) {
     } catch {
       continue;
     }
+    if (!message || typeof message !== "object") continue;
     logDebug(`Camera: ${line.trim()}`);
-    if (message.event === "turned" && message.moved) extendCameraBusy(message);
-    if (message.event === "error") setCameraNote(String(message.message || message.code || "error"));
-    if (message.event === "ready" && message.answered === false) setCameraNote("the camera does not answer; check camera_ip.");
+    handleCameraMessage(proc, message);
   }
 }
 
@@ -1293,32 +1556,35 @@ function handleCameraProcessEvent(evt) {
   if (detail.action === "stdOut") {
     handleCameraOutput(String(detail.data || ""));
   } else if (detail.action === "exit") {
-    const restarting = cameraProc.restarting;
-    cameraProc.exited = true;
+    const proc = cameraProc;
     cameraProc = null;
-    showCameraControls(false);
-    if (!restarting) setCameraNote("the camera helper stopped.");
+    proc.exited = true;
+    failPendingCameraRequests(proc);
+    showCameraControls();
+    if (!proc.restarting && !proc.stopping) setCameraNote("the camera adapter stopped.");
   }
 }
 
 // x and y: where the click fell on the picture, 0..1 from its top left corner.
 function turnCameraTo(x, y) {
-  if (!cameraActive() || mode === "idle" || !scanDialog.hidden) return;
+  if (!cameraCan("centerOn") || mode === "idle" || !scanDialog.hidden) return;
   if (!(x >= 0 && x <= 1 && y >= 0 && y <= 1)) return;
   // A click in the middle needs no turn, and a double click must not turn twice.
   if (Math.abs(x - 0.5) < 0.02 && Math.abs(y - 0.5) < 0.02) return;
   if (Date.now() < cameraBusyUntil) return;
   cameraBusyUntil = Date.now() + CAMERA_CLICK_COOLDOWN_MS;
-  sendCameraCommand(`CENTER ${x.toFixed(4)} ${y.toFixed(4)} ${videoAspect.toFixed(4)}`);
+  sendCameraRequest("ptz.centerOn", { x: Number(x.toFixed(4)), y: Number(y.toFixed(4)), aspect: Number(videoAspect.toFixed(4)) });
 }
 
+// Percent of the zoom range per button press.
 function cameraZoomStep() {
   return Math.round(numberParam(parameters.camera_zoom_step, DEFAULT_PARAMS.camera_zoom_step, 1, 50));
 }
 
+// delta: percent of the zoom range, negative zooms out.
 function zoomCamera(delta) {
-  if (!cameraActive()) return;
-  sendCameraCommand(`ZOOM ${delta}`);
+  if (!cameraCan("zoom")) return;
+  sendCameraRequest("zoom.by", { delta: delta / 100 });
 }
 
 function handleVideoClick(evt) {
@@ -1329,7 +1595,7 @@ function handleVideoClick(evt) {
 
 // A wheel notch is half a button step. Wheel up zooms in.
 function handleStageWheel(evt) {
-  if (!cameraActive() || !scanDialog.hidden) return;
+  if (!cameraCan("zoom") || !scanDialog.hidden) return;
   evt.preventDefault();
   const now = Date.now();
   if (now - lastWheelAt < CAMERA_WHEEL_INTERVAL_MS) return;
@@ -1346,10 +1612,10 @@ const ARROW_DIRECTIONS = {
 };
 
 // Arrow keys turn the camera while no text field has the focus; Shift makes the step five times larger.
-// Key repeat is thinned out, and the helper builds each step on the previous target.
+// Key repeat is thinned out, and the adapter builds each step on the previous target.
 function handleArrowKey(evt) {
   const direction = ARROW_DIRECTIONS[evt.key];
-  if (!direction || !cameraActive() || !scanDialog.hidden) return;
+  if (!direction || !cameraCan("nudge") || !scanDialog.hidden) return;
   if (evt.ctrlKey || evt.altKey || evt.metaKey) return;
   const tag = evt.target && evt.target.tagName ? String(evt.target.tagName).toUpperCase() : "";
   if (tag === "INPUT" || tag === "TEXTAREA" || tag === "SELECT" || (evt.target && evt.target.isContentEditable)) return;
@@ -1357,9 +1623,9 @@ function handleArrowKey(evt) {
   const now = Date.now();
   if (now - lastNudgeAt < CAMERA_NUDGE_INTERVAL_MS) return;
   lastNudgeAt = now;
-  // The camera takes whole degrees.
+  // Whole degrees: the camera takes no finer steps.
   const step = Math.max(1, Math.round(numberParam(parameters.camera_arrow_step_deg, DEFAULT_PARAMS.camera_arrow_step_deg, 1, 20))) * (evt.shiftKey ? 5 : 1);
-  sendCameraCommand(`NUDGE ${direction[0] * step} ${direction[1] * step}`);
+  sendCameraRequest("ptz.nudge", { pan: direction[0] * step, tilt: direction[1] * step });
 }
 
 function handleKeyDown(evt) {
@@ -2241,7 +2507,7 @@ function applyState(state) {
   modeBadge.className = `mode-badge is-${mode}`;
   modeBadge.textContent = mode === "recording" ? "REC" : mode === "preview" ? "PREVIEW" : "";
   const shown = withCameraNote(state.status || "");
-  // A message from the camera helper makes an otherwise plain status a warning.
+  // A message from the camera adapter makes an otherwise plain status a warning.
   const kind = state.statusKind || "info";
   setStatus(shown, shown !== (state.status || "") && kind === "info" ? "warn" : kind);
   autoReconnect.checked = Boolean(parameters.auto_reconnect);

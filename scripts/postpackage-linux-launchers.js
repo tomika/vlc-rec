@@ -43,6 +43,24 @@ async function pathExists(filePath) {
   }
 }
 
+// The camera adapters (player/plugins/<id>/): the manifest and the programs for this system and architecture,
+// which are named <id>-linux_<arch>.
+async function copyCameraAdapters(srcRoot, dstRoot, programSuffix) {
+  if (!(await pathExists(srcRoot))) return;
+  for (const entry of await fs.readdir(srcRoot, { withFileTypes: true })) {
+    if (!entry.isDirectory()) continue;
+    const dstDir = path.join(dstRoot, entry.name);
+    await fs.mkdir(dstDir, { recursive: true });
+    for (const file of await fs.readdir(path.join(srcRoot, entry.name))) {
+      const isManifest = file === "plugin.json";
+      if (!isManifest && !file.endsWith(programSuffix)) continue;
+      const dst = path.join(dstDir, file);
+      await fs.copyFile(path.join(srcRoot, entry.name, file), dst);
+      if (!isManifest) await fs.chmod(dst, 0o755);
+    }
+  }
+}
+
 async function buildLinuxLauncherBundles() {
   if (!await pathExists(DIST_DIR)) {
     console.warn(`[linux-launchers] Dist directory not found: ${DIST_DIR}`);
@@ -75,17 +93,15 @@ async function buildLinuxLauncherBundles() {
     await fs.mkdir(bundleDir, { recursive: true });
     await fs.copyFile(binarySrc, binaryDst);
 
-    // The player, and the optional camera helper (OSC camera control).
-    for (const helper of ["vlc-rec-player", "vlc-rec-camera"]) {
-      const helperName = `${helper}-linux_${arch}`;
-      const helperSrc = path.join(DIST_DIR, "player", helperName);
-      if (await pathExists(helperSrc)) {
-        const helperDst = path.join(bundleDir, "player", helperName);
-        await fs.mkdir(path.dirname(helperDst), { recursive: true });
-        await fs.copyFile(helperSrc, helperDst);
-        await fs.chmod(helperDst, 0o755);
-      }
+    const playerName = `vlc-rec-player-linux_${arch}`;
+    const playerSrc = path.join(DIST_DIR, "player", playerName);
+    if (await pathExists(playerSrc)) {
+      const playerDst = path.join(bundleDir, "player", playerName);
+      await fs.mkdir(path.dirname(playerDst), { recursive: true });
+      await fs.copyFile(playerSrc, playerDst);
+      await fs.chmod(playerDst, 0o755);
     }
+    await copyCameraAdapters(path.join(DIST_DIR, "player", "plugins"), path.join(bundleDir, "player", "plugins"), `-linux_${arch}`);
     await fs.copyFile(ICON_SRC, iconDst);
     await fs.writeFile(launcherDst, launcherScriptText(), "utf8");
     await fs.writeFile(desktopDst, desktopFileText(), "utf8");

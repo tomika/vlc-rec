@@ -66,14 +66,14 @@
           </div>
         </div>
 
-        <!-- Shown when camera_ip is a valid address (a scan result sets it too). -->
+        <!-- Shown when a camera adapter is connected: what it is, its web page, how to use the controls. -->
         <div id="cameraPage" class="drawer-item drawer-camera" hidden>
           <span class="field-label">Camera</span>
           <div class="row camera-page-row">
             <span id="cameraAddressText" class="camera-address"></span>
             <button id="cameraPageBtn" class="btn btn-blue btn-inline" type="button" title="Opens the camera's own control page in the web browser: there, for example, the SD card can be formatted.">Open web page</button>
           </div>
-          <p class="drawer-hint">Click the picture to centre it. Mouse wheel: zoom. Arrow keys: turn (Shift: larger steps).</p>
+          <p id="cameraHint" class="drawer-hint"></p>
         </div>
       </section>
 
@@ -86,13 +86,13 @@
 
         <div id="status" class="status" role="status"></div>
 
-        <!-- Shown only when camera_ip is set and the camera helper is present. -->
+        <!-- Shown when a camera adapter is connected and declares zoom or a turning speed. -->
         <div id="cameraBar" class="camera-bar" role="group" aria-label="Camera" hidden>
-          <div class="camera-item">
+          <div id="cameraZoomItem" class="camera-item">
             <button id="zoomOutBtn" class="btn btn-zoom" type="button" title="Camera zoom out (mouse wheel down)" aria-label="Camera zoom out">&minus;</button>
             <button id="zoomInBtn" class="btn btn-zoom" type="button" title="Camera zoom in (mouse wheel up)" aria-label="Camera zoom in">+</button>
           </div>
-          <div class="camera-item camera-item-speed" title="How fast the camera turns after a click on the picture, in degrees per second">
+          <div id="cameraSpeedItem" class="camera-item camera-item-speed" title="How fast the camera turns after a click on the picture, in degrees per second">
             <input id="cameraSpeed" type="range" min="1" max="90" step="1" value="10" aria-label="Camera turning speed in degrees per second" />
             <output id="cameraSpeedValue" for="cameraSpeed">10 °/s</output>
           </div>

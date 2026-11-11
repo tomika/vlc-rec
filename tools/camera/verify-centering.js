@@ -1,11 +1,11 @@
 // Closed loop check of "turn so that the clicked point ends up in the middle", on a real camera.
 // A development tool, not part of the app. Run in a container that has node and ffmpeg with SRT,
-// on the host network, with the built camera helper mounted:
+// on the host network, with the built camera adapter mounted:
 //
 //   podman run --rm --network host -v REPO/player:/p:ro -v REPO/tools/camera:/t:ro \
-//     localhost/vlc-rec-e2e:1 node /t/verify-centering.js 192.168.1.50 [zoom steps...]
+//     localhost/vlc-rec-e2e:1 node /t/verify-centering.js 192.168.1.50 [zoom steps in the camera's units...]
 //
-// For some points of the picture the helper is asked to CENTER them, as a click would. A patch
+// For some points of the picture the obsbot-tail2 adapter is asked to ptz.centerOn them, as a click would. A patch
 // around the point is cut out of the picture taken before, and looked for in the picture taken
 // after the turn (normalised cross correlation). It should now be in the middle. After each turn
 // the camera is turned back, and at the end the zoom is put back too.
@@ -92,63 +92,78 @@ async function main() {
   const ffmpeg = spawn("ffmpeg", ["-hide_banner", "-loglevel", "error", "-y",
     "-i", `srt://${IP}:5000?mode=caller&latency=200&connect_timeout=8000`,
     "-vf", `fps=2,scale=${W}:${H},format=gray`, "-f", "image2", "-update", "1", "-atomic_writing", "1", FRAME], { stdio: "inherit" });
-  const helper = spawn("/p/vlc-rec-camera-linux_x64", ["--ip", IP, "--speed", "30"], { stdio: ["pipe", "pipe", "inherit"] });
-  process.on("exit", () => { ffmpeg.kill("SIGKILL"); helper.kill("SIGKILL"); });
+  const adapter = spawn("/p/plugins/obsbot-tail2/obsbot-tail2-linux_x64", [], { stdio: ["pipe", "pipe", "inherit"] });
+  process.on("exit", () => { ffmpeg.kill("SIGKILL"); adapter.kill("SIGKILL"); });
 
-  const waiters = [];
+  // Requests get their answer by id; the events of the adapter are kept by name, the latest of each.
+  const pending = new Map();
+  const last = {};
+  let nextId = 1;
   let buffer = "";
-  helper.stdout.on("data", (chunk) => {
+  adapter.stdout.on("data", (chunk) => {
     buffer += chunk;
     const lines = buffer.split("\n");
     buffer = lines.pop();
     for (const line of lines) {
-      let event;
-      try { event = JSON.parse(line); } catch { continue; }
-      for (let i = 0; i < waiters.length; i++) if (waiters[i].name === event.event) { waiters.splice(i, 1)[0].resolve(event); break; }
+      let message;
+      try { message = JSON.parse(line); } catch { continue; }
+      if (message.id !== undefined && pending.has(message.id)) {
+        const entry = pending.get(message.id);
+        pending.delete(message.id);
+        if (message.error) entry.reject(new Error(`${entry.method}: ${message.error.message}`));
+        else entry.resolve(message.result);
+      } else if (message.event) {
+        last[message.event] = message;
+      }
     }
   });
-  const command = (line, answer, timeout = 8000) => new Promise((resolve, reject) => {
-    const entry = { name: answer, resolve };
-    waiters.push(entry);
-    setTimeout(() => { const i = waiters.indexOf(entry); if (i >= 0) { waiters.splice(i, 1); reject(new Error(`no ${answer} for ${line}`)); } }, timeout);
-    helper.stdin.write(line + "\n");
+  const request = (method, params = {}, timeout = 8000) => new Promise((resolve, reject) => {
+    const id = nextId++;
+    const timer = setTimeout(() => { pending.delete(id); reject(new Error(`no answer to ${method}`)); }, timeout);
+    pending.set(id, { method, resolve: (r) => { clearTimeout(timer); resolve(r); }, reject: (e) => { clearTimeout(timer); reject(e); } });
+    adapter.stdin.write(JSON.stringify({ id, method, params }) + "\n");
   });
+  const ZOOM_UNITS = 36; // the top of the zoom range of a Tail 2, the default of the adapter
+  const state = async () => ({ ...(await request("ptz.get")), zoom: Math.round((await request("zoom.get")).value * ZOOM_UNITS) });
 
   for (let i = 0; i < 60 && !fs.existsSync(FRAME); i++) await sleep(500);
   if (!fs.existsSync(FRAME)) throw new Error("no picture from the camera");
-  await command("GET", "state");
-  const start = await command("GET", "state");
+  await request("hello", { interface: 1 });
+  await request("connect", { config: { host: IP } }, 8000);
+  await request("ptz.setSpeed", { value: 30 });
+  const start = await state();
   console.log(`start: pan ${start.pan}, tilt ${start.tilt}, zoom ${start.zoom}`);
   let totalZoom = 0;
   const results = [];
   try {
     for (const step of EXTRA_ZOOM) {
       if (step) {
-        await command(`ZOOM ${step}`, "zoom");
+        await request("zoom.by", { delta: step / ZOOM_UNITS });
         totalZoom += step;
         await sleep(4000);
       }
-      const state = await command("GET", "state");
+      const now = await state();
       for (const [x, y] of POINTS) {
         const before = await frame();
-        const turned = await command(`CENTER ${x} ${y} ${W / H}`, "turned");
+        await request("ptz.centerOn", { x, y, aspect: W / H });
+        const turned = last.turned;
         await sleep(3500);
         const after = await frame();
         const found = findPatch(before, after, x * W, y * H);
         const global = globalShift(before, after);
         const fx = found.x / W, fy = found.y / H;
         const error = Math.hypot((fx - 0.5) * 100, (fy - 0.5) * 100 * H / W);
-        results.push({ zoom: state.zoom, x, y, fx, fy, score: found.score, error });
-        console.log(`zoom ${String(state.zoom).padStart(2)}  point (${x.toFixed(2)}, ${y.toFixed(2)}) turned ${turned.fromPan},${turned.fromTilt} -> ${turned.toPan},${turned.toTilt}  found at (${fx.toFixed(3)}, ${fy.toFixed(3)}) correlation ${found.score.toFixed(2)}  miss ${error.toFixed(1)} % of the width; whole picture moved ${global.shift} px (needed ${Math.round((x - 0.5) * W)}, correlation ${global.score.toFixed(2)})`);
+        results.push({ zoom: now.zoom, x, y, fx, fy, score: found.score, error });
+        console.log(`zoom ${String(now.zoom).padStart(2)}  point (${x.toFixed(2)}, ${y.toFixed(2)}) turned ${turned.fromPan},${turned.fromTilt} -> ${turned.toPan},${turned.toTilt}  found at (${fx.toFixed(3)}, ${fy.toFixed(3)}) correlation ${found.score.toFixed(2)}  miss ${error.toFixed(1)} % of the width; whole picture moved ${global.shift} px (needed ${Math.round((x - 0.5) * W)}, correlation ${global.score.toFixed(2)})`);
         // Back to where it was, so that the next point starts from the same picture.
-        await command(`NUDGE ${turned.toPan - turned.fromPan} ${turned.toTilt - turned.fromTilt}`, "nudged");
+        await request("ptz.nudge", { pan: turned.fromPan - turned.toPan, tilt: turned.fromTilt - turned.toTilt });
         await sleep(3000);
       }
     }
   } finally {
-    if (totalZoom) await command(`ZOOM ${-totalZoom}`, "zoom").catch(() => {});
+    if (totalZoom) await request("zoom.by", { delta: -totalZoom / ZOOM_UNITS }).catch(() => {});
     await sleep(3000);
-    helper.stdin.write("STOP\n");
+    await request("shutdown").catch(() => {});
   }
   const good = results.filter((r) => r.score > 0.6);
   const mean = good.reduce((sum, r) => sum + r.error, 0) / (good.length || 1);

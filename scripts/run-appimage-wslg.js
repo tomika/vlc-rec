@@ -4,7 +4,7 @@
 //   npm run run:appimage -- [--stream IP:PORT] [--camera IP]
 //
 // Without the options, the stream address and the camera address come from ip_address and
-// camera_ip in vlc_rec_params.json in the repository (the settings file of npm start).
+// camera_config.host in vlc_rec_params.json in the repository (the settings file of npm start).
 // The container uses the host network, so a camera or an SRT source on the LAN is reachable.
 // Settings go to a throwaway folder inside the container, so nothing on this computer changes.
 // Needs podman (the podman machine is a WSL2 distribution with WSLg) and the image of the
@@ -29,7 +29,8 @@ try {
   // No settings file: only the options count.
 }
 const stream = option("--stream") || (ipv4Port.test(saved.ip_address || "") ? saved.ip_address : "");
-const camera = option("--camera") || (ipv4.test(saved.camera_ip || "") ? saved.camera_ip : "");
+const savedCamera = (saved.camera_config && saved.camera_config.host) || saved.camera_ip || "";
+const camera = option("--camera") || (ipv4.test(savedCamera) ? savedCamera : "");
 if ((stream && !ipv4Port.test(stream)) || (camera && !ipv4.test(camera))) {
   console.error("usage: npm run run:appimage -- [--stream IP:PORT] [--camera IP]");
   process.exit(2);
@@ -44,7 +45,7 @@ if (!fs.existsSync(appImage)) {
 const settings = JSON.stringify({
   ip_address: stream || "127.0.0.1:5000",
   output_path: "/tmp/recordings",
-  ...(camera ? { camera_ip: camera } : {})
+  ...(camera ? { camera_plugin: "obsbot-tail2", camera_config: { host: camera } } : {})
 });
 // The settings go in as an environment variable, never into the shell text.
 const script = [

@@ -287,6 +287,13 @@ function prepareApp(scenario) {
   if (!WIN) {
     fs.chmodSync(path.join(app, binaryName), 0o755);
     fs.chmodSync(path.join(app, "player", PLAYER_NAME), 0o755);
+    // The camera adapters: every file of their folders but the manifests runs.
+    const pluginsDir = path.join(app, "player", "plugins");
+    for (const id of fs.existsSync(pluginsDir) ? fs.readdirSync(pluginsDir) : []) {
+      for (const name of fs.readdirSync(path.join(pluginsDir, id))) {
+        if (!name.endsWith(".json")) fs.chmodSync(path.join(pluginsDir, id, name), 0o755);
+      }
+    }
   }
   return { app, binary: path.join(app, binaryName) };
 }
@@ -299,7 +306,7 @@ async function runScenario(scenario, env) {
   const binary = APPIMAGE || plainBinary;
   const dir = path.join(app, "e2e");
   // E2E_PARAMS (a JSON object) is merged into the settings file of every scenario.
-  const params = { ...(scenario === "camera" ? { camera_ip: "127.0.0.1" } : {}), ...(process.env.E2E_PARAMS ? JSON.parse(process.env.E2E_PARAMS) : {}) };
+  const params = { ...(scenario === "camera" ? { camera_plugin: "obsbot-tail2", camera_config: { host: "127.0.0.1" } } : {}), ...(process.env.E2E_PARAMS ? JSON.parse(process.env.E2E_PARAMS) : {}) };
   if (Object.keys(params).length) fs.writeFileSync(path.join(app, "vlc_rec_params.json"), JSON.stringify(params));
   if (scenario === "camera") {
     startFakeCamera();

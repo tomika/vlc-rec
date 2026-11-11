@@ -111,7 +111,7 @@ const E2E_SCENARIO = "__SCENARIO__";
   }
 
   const click = (button) => button.click();
-  // The camera helper keeps running between streams; the others must be gone.
+  // The camera adapter keeps running between streams; the others must be gone.
   const isStopped = async () => (await Neutralino.os.getSpawnedProcesses())
     .filter((proc) => !cameraProc || proc.id !== cameraProc.id).length === 0;
   const hasStats = () => currentProcess && currentProcess.readBytes;
@@ -230,10 +230,10 @@ const E2E_SCENARIO = "__SCENARIO__";
 
     if (E2E_SCENARIO === "camera") {
       // run-e2e.js starts a fake OSC camera and writes its address into the settings file, so
-      // init() has started the camera helper. Mouse and keys come through the X server, as a
+      // init() has started the camera adapter. Mouse and keys come through the X server, as a
       // user's would: over the real native video window.
       await setWindow(1120, 630);
-      await waitFor("camera: helper running", () => cameraActive());
+      await waitFor("camera: adapter connected", () => cameraCan("zoom"));
       check("camera: controls shown", cameraBar.hidden === false);
       await configure("camera", "mkv", folder);
       click(previewBtn);

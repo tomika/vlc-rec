@@ -402,6 +402,7 @@ body {
   gap: 8px;
 }
 
+.camera-item[hidden],
 .camera-bar[hidden] {
   display: none;
 }
