@@ -13,7 +13,8 @@ This is a NeutralinoJS port of the Python VLC Stream Recorder app.
 - Optional automatic VLC reconnect after a stream stall, with a new numbered recording file
 - Scan dialog for discovering reachable `IP:port` endpoints on local networks
 - Preview embedded in the app window on Windows and Linux x64 through libVLC
-- The preview gets the largest area its aspect ratio allows; while streaming, the controls collapse to a compact bar when they would cost the video too much room
+- The preview gets the largest area its aspect ratio allows; while streaming, the controls collapse to a compact bar when they would cost the video too much room. The panel is a bar that is always there (time, status line, camera controls with a camera, record and preview buttons) and a drawer with everything else (stream address, folder, file name, the two options, the camera's web page); the settings button beside the buttons folds the drawer away and opens it again. The drawer is above the bar when the panel is below the video, and beside it when the panel is next to the video. The status line is plain text with a coloured edge for a warning (amber) or an error (red)
+- Optional camera control for an OBSBOT Tail 2 over its documented OSC interface: click the preview to turn the camera so that the clicked point ends up in the middle, mouse wheel and `+`/`-` buttons zoom, arrow keys pan and tilt. See [Camera control](#camera-control).
 
 ## Requirements
 
@@ -24,6 +25,39 @@ This is a NeutralinoJS port of the Python VLC Stream Recorder app.
 - Linux: start the app with `run-vlc-rec.sh`. It selects X11 or XWayland, which embedding needs. In development use `GDK_BACKEND=x11 npm start`.
 - Node.js 18+.
 - Building the player needs podman or docker.
+
+## When the preview stays black
+
+The app writes `neutralinojs.log` into its folder (the settings folder in the AppImage). Besides its own lines it holds what the player reports:
+
+- `Player playing: N bytes read, D pictures decoded, S shown, L lost`, when the state changes and a few times after the start. No bytes read: the stream does not arrive (address, firewall, a camera that serves one client). Bytes read but nothing decoded: the stream format, or a missing SRT or codec plugin. Decoded but not shown: the video output.
+- `libVLC warning|error [module] text`: libVLC's own warnings and errors (repeats left out, 300 lines at most), for example from the `direct3d11` video output.
+- On Windows `Player player window ...`, three seconds after the start: the child windows of the player. The picture window of libVLC is missing there when libVLC never made its video output.
+
+`VLC_REC_VLC_ARGS` in the environment of the app adds libVLC options for a try, separated by spaces: `--verbose=2` puts all libVLC messages in the log, `--vout=direct3d9` or `--avcodec-hw=none` change the video output and the decoder. On Windows: `set VLC_REC_VLC_ARGS=--vout=direct3d9` in a command prompt, then start the app from it.
+
+## Camera control
+
+Off until `camera_ip` is set in `vlc_rec_params.json` (for example `"camera_ip": "192.168.1.50"`). It needs the helper `player/vlc-rec-camera-<win|linux>_x64` next to the player; without it, or without an address, the app has no camera controls. It talks to the camera's OSC server (UDP 57110; the camera answers to UDP 57120 on this computer, so close other camera software that uses that port, and on Windows allow it in the firewall if asked).
+
+- **Click the preview**: the camera turns so that the clicked point ends up in the middle, at the speed of the **Turn speed** slider of the camera controls (1 to 90 degrees per second, whole degrees; the camera controls are part of the compact panel too). Choosing a stream in the **Scan** dialog also sets `camera_ip` to that address and restarts the camera helper, on the assumption that the stream comes from the camera. The turn is one command: the camera moves both axes at the same speed, so on a diagonal turn the axis with the shorter way arrives first (24 and 6 degrees at 10 degrees per second: after 2.4 s and 0.6 s). Making them arrive together is possible with a target every 100 ms along the straight line (measured: 0.2 s apart), but the targets are whole degrees, so the short axis then moves in steps of one degree and the picture is jerky; that was tried and dropped. The turn is an estimate (a pinhole model with the field of view below; lens distortion is ignored), and the picture lags behind the camera, so the next click is accepted one second later.
+- **Mouse wheel** over the preview, or the `-` and `+` buttons of the camera controls: zoom out and in. A button press is `camera_zoom_step` percent of the zoom range, a wheel notch half of that.
+- **Camera web page**: with a camera address set, the drawer has an **Open web page** button that opens `http://CAMERA/` in the system's web browser, where the camera's own control page lets you, for example, format the SD card. (The page can be framed, but the native video window would cover an in-app frame, and the system browser does not depend on how the page was written.)
+- **Arrow keys** (when no text field has the focus): pan and tilt by `camera_arrow_step_deg` degrees per press and per key repeat; Shift makes the step five times larger.
+
+Settings in `vlc_rec_params.json`:
+
+- `camera_ip`: IPv4 address of the camera; empty (the default) switches the feature off.
+- `camera_hfov_deg` (default `76`), `camera_zoom_max` (default `36`) and `camera_zoom_ratio` (default `4.6`): horizontal field of view at zoom 0, the top of the camera's zoom range in the units it reports (the Tail 2 stops at 36 whatever it is asked for) and the zoom ratio there. The defaults were measured on one Tail 2 from its own picture (`tools/camera/calibrate-fov.js`): 75.7 degrees, and ratios 1.92, 3.52 and 4.61 at zoom 9, 24 and 36. They decide how far a click turns the camera: if clicked points end up short of the middle, raise the field of view; if they overshoot, lower it.
+- `camera_turn_speed`: turning speed after a click, in degrees per second, 1-90 (default `10`; measured on a Tail 2: the speed value is about the speed it turns at, a 20 degree turn takes 0.7 s at 30 and 2 s at 10). The slider changes and saves it when it is let go (the number beside it follows while it is dragged; after a drag it gives the keyboard back, because the arrow keys turn the camera).
+- `camera_arrow_speed`: the same for the arrow keys (default `30`). Key repeat piles up targets, and a slow camera would run on after the key is released.
+- `preview_caching_ms`: network cache of the player in ms, also the **Preview buffer** field of the drawer (default `500`; the field takes 0 to 10000, the file anything from 0; `-1` leaves VLC's own 1000). It applies when a preview or recording is **started**: the player takes it as an argument. While a running one has another value than the field, a note under the field says so, and for a preview a button restarts it with the new value (a recording is not cut; it takes the value at its next start or reconnect). VLC's default delays the picture by about a second. Too small a cache **freezes the picture**, and how small is too small depends on the network and the computer, so nothing is forced: the hint under the field says to lower it until the picture stutters and raise it a little. With the 4K stream of a Tail 2 over a LAN in a container, software decoding and a real window, 150 ms froze it, 250 ms and more moved (without a window 150 ms lost about 40 percent of the pictures, 300 ms about 10, 500 ms none). A smaller stream would allow less.
+- `camera_zoom_step`: zoom units per button press (default `4`, about a tenth of the range); a wheel notch is half of that.
+- `camera_arrow_step_deg`: degrees per arrow key press (default `2`, whole degrees).
+
+Notes from measuring a Tail 2: the position the camera reports is accurate to about 1 degree, which is also the accuracy of a turn; pan and tilt cannot be driven together by speed (the camera acts on the last direction command only), so every move here is a turn to an absolute angle. With the real camera, a click turned the clicked point to the middle within a few percent of the picture width (`tools/camera/verify-centering.js`, which compares the picture before and after). Messages from the camera helper (for example an unreachable camera) appear after the status text for a few seconds. Tested: the helper against a fake camera and against a real Tail 2, and the whole chain (click, wheel, keys through a real window with real libVLC) in the Linux end-to-end test, on X11 with openbox and on sway with XWayland. Not tested: the same chain on Windows, and on real GNOME or KDE desktops.
+
+**Delay of the picture.** Measured on a Tail 2 (4K H.264 over SRT, pan command to the first changed picture): 720 to 790 ms, with the receiver's SRT latency at 20 and at 400 ms alike, so the receiver is not what limits it. About 150 ms of that is the camera starting to move, the rest is the camera's own encoding and its SRT delay, which can only be changed on the camera (its SRT settings: the delay, and a lower resolution or bitrate to decode faster). VLC adds its own network cache on top (1000 ms by default), which `preview_caching_ms` cuts. With the camera's **RTSP** output switched on (the camera's UVC, RTSP and SRT modes exclude each other) there are two streams without a password: `rtsp://CAMERA:554/stream1` (3840x2160 H.264, AAC) and `rtsp://CAMERA:554/stream2` (1280x720 H.265, AAC). Their delay is the same, 640 to 770 ms with TCP or UDP and at either resolution, so a second, smaller stream does not give a real time picture; it would only make decoding lighter. The camera did not serve `stream2` while another RTSP client was connected, and `stream2` failed with `500 Internal Server Error` after an interrupted test; switching RTSP off and on in the camera clears that. The VLC of the AppImage (Debian build) has no RTSP module. Measured with ffmpeg, not with VLC.
 
 ## Setup
 
@@ -37,7 +71,7 @@ npm start
 ## Build
 
 ```bash
-npm run build:player   # builds player/ and the test stub in a container
+npm run build:player   # builds player/ (player, camera helper) and the test stub in a container
 npm run build
 ```
 
@@ -49,6 +83,9 @@ npm run test:e2e         # real app window with a libVLC stub, this OS
 npm run test:e2e:real    # real app window with VLC 3 and ffmpeg, this OS
 npm run test:e2e:linux   # Linux stub, X11 and Wayland runs in a container
 npm run test:e2e:appimage # the built AppImage on several distributions, needs podman
+node tests/e2e/camera-helper.js   # the camera helper against a fake camera, in a container
+E2E_ONLY=camera node tests/e2e/run-linux.js x11   # camera clicks, wheel and keys in a real window
+E2E_HOST_NETWORK=1 E2E_ONLY=motion E2E_PARAMS='{"ip_address":"192.168.1.50:5000","preview_caching_ms":500}' node tests/e2e/run-linux.js x11   # does the picture of a real camera move? (screenshots compared)
 ```
 
 The end-to-end tests open a window that stays on top for a few minutes. Screenshots go to `e2e-output/`.
@@ -89,6 +126,8 @@ chmod +x vlc-rec-x86_64.AppImage
 - Settings and the log are stored in `~/.config/vlc-rec`.
 - Hardware video decoding has not been tested with the bundled libVLC, so expect software decoding.
 - The file contains third-party software under the GPL and LGPL. Their licenses and versions are inside the image, in `usr/share/doc/third-party`. Whoever distributes the file must also meet the source-code obligations of those licenses.
+
+To try the AppImage from a Windows machine, `npm run run:appimage` runs it in a podman container and shows its window on the Windows desktop through WSLg. The stream and camera addresses come from `ip_address` and `camera_ip` in `vlc_rec_params.json`, or from `npm run run:appimage -- --stream 192.168.1.50:5000 --camera 192.168.1.50`. The container uses the host network, so the camera is reachable; its settings and recordings stay inside the container and are gone when the window closes.
 
 ## CI and GitHub Releases
 

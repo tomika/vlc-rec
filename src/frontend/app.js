@@ -27,6 +27,18 @@ const panel = document.getElementById("panel");
 const stage = document.getElementById("stage");
 const panelToggle = document.getElementById("panelToggle");
 const modeBadge = document.getElementById("modeBadge");
+const cameraBar = document.getElementById("cameraBar");
+const zoomOutBtn = document.getElementById("zoomOutBtn");
+const zoomInBtn = document.getElementById("zoomInBtn");
+const cameraSpeed = document.getElementById("cameraSpeed");
+const cameraSpeedValue = document.getElementById("cameraSpeedValue");
+const previewCaching = document.getElementById("previewCaching");
+const bufferPending = document.getElementById("bufferPending");
+const bufferPendingText = document.getElementById("bufferPendingText");
+const bufferApplyBtn = document.getElementById("bufferApplyBtn");
+const cameraPage = document.getElementById("cameraPage");
+const cameraAddressText = document.getElementById("cameraAddressText");
+const cameraPageBtn = document.getElementById("cameraPageBtn");
 
 const DEFAULT_PARAMS = {
   ip_address: "127.0.0.1:5000",
@@ -36,7 +48,26 @@ const DEFAULT_PARAMS = {
   scan_concurrency: 25,
   scan_timeout_ms: 300,
   auto_reconnect: false,
-  stall_timeout_sec: 15
+  stall_timeout_sec: 15,
+  // Optional camera control (OBSBOT Tail 2 over OSC). Empty camera_ip: no camera controls.
+  camera_ip: "",
+  // How far a click on the picture turns the camera depends on these, measured on a Tail 2:
+  // horizontal field of view at zoom 0, the top of its zoom range (the camera stops there
+  // whatever it is asked for) and the zoom ratio at the top.
+  camera_hfov_deg: 76,
+  camera_zoom_max: 36,
+  camera_zoom_ratio: 4.6,
+  // Degrees per second of a turn after a click (the speed value is about that); the slider
+  // next to the zoom buttons changes it. The arrow keys have a fixed speed of their own.
+  camera_turn_speed: 10,
+  camera_arrow_speed: 30,
+  camera_zoom_step: 4,
+  camera_arrow_step_deg: 2,
+  // VLC's own network caching (1000 ms) delays the picture by about that much. How small it can be
+  // depends on the network and the computer: with the 4K stream of a Tail 2 over a LAN and software
+  // decoding, 150 ms froze the picture, 250 ms and more moved, 500 ms lost none. 0 and up is taken as
+  // it is; -1 leaves VLC's default.
+  preview_caching_ms: 500
 };
 
 const PARAMS_FILE = `${NL_PATH}/vlc_rec_params.json`;
@@ -81,7 +112,17 @@ const FULL_PANEL_EXPAND_SHARE = 0.85;
 // Resizing keeps the current arrangement while it is nearly as good, so the panel
 // does not jump between the side and the bottom around the break-even size.
 const LAYOUT_KEEP_SHARE = 0.97;
-const SIDE_PANEL_MAX_WIDTH = 520;
+const SIDE_PANEL_MAX_WIDTH = 560;
+// The camera needs about half a second to turn and the picture lags behind it, so a click
+// right after a turn would aim at a picture that is already out of date.
+const CAMERA_CLICK_COOLDOWN_MS = 1000;
+const CAMERA_NUDGE_INTERVAL_MS = 90;
+const CAMERA_WHEEL_INTERVAL_MS = 120;
+const CAMERA_NOTE_MS = 6000;
+// Measured on a Tail 2 with its SRT picture: a turn starts 150 to 500 ms after the command, and
+// the picture shows it about 600 ms later even with the smallest receiver buffer.
+const CAMERA_TURN_START_MS = 400;
+const CAMERA_PICTURE_LAG_MS = 800;
 
 let parameters = { ...DEFAULT_PARAMS };
 let mode = "idle";
@@ -89,6 +130,8 @@ let currentProcess = null;
 let startTimeMs = 0;
 let outputFile = "";
 let statusText = "";
+// How the status line looks: "info" (plain), "warn" (something is being worked around) or "error".
+let statusKind = "info";
 let operationToken = 0;
 let simSizeBytes = 1024;
 let simLastTickSec = 0;
@@ -109,6 +152,13 @@ let layoutStageSize = "";
 let startingStream = false;
 // "", "full" or "compact": a choice made with the toggle button.
 let panelOverride = "";
+// The camera helper process, or null; and a short message about it shown with the status.
+let cameraProc = null;
+let cameraNote = "";
+let cameraNoteUntil = 0;
+let cameraBusyUntil = 0;
+let lastNudgeAt = 0;
+let lastWheelAt = 0;
 let scanState = {
   running: false,
   abortRequested: false,
@@ -184,10 +234,17 @@ function logDebug(message) {
   }
 }
 
-function setStatus(text) {
+function setStatus(text, kind = "info") {
   status.textContent = text || "";
+  status.dataset.kind = text ? kind : "";
   // Narrow layouts cut the message to one line; the tooltip shows all of it.
   status.title = text || "";
+}
+
+// What the status line says on the next refresh (once a second, and after each operation).
+function noteStatus(text, kind = "info") {
+  statusText = text;
+  statusKind = kind;
 }
 
 function setScanProgress(text) {
@@ -517,7 +574,7 @@ async function saveParams(ipAddress, outputPathValue, outputFilename) {
   await Neutralino.filesystem.writeFile(PARAMS_FILE, `${JSON.stringify(parameters, null, 2)}\n`);
 }
 
-function resetState(newStatus = "Stopped.") {
+function resetState(newStatus = "Stopped.", kind = "info") {
   activeSession = null;
   mode = "idle";
   currentProcess = null;
@@ -525,7 +582,7 @@ function resetState(newStatus = "Stopped.") {
   outputFile = "";
   simSizeBytes = 1024;
   simLastTickSec = 0;
-  statusText = newStatus;
+  noteStatus(newStatus, kind);
 }
 
 function shellQuote(value) {
@@ -903,11 +960,22 @@ async function applySelectedAddress(addressPort) {
   ip.value = addressPort;
   parameters.ip_address = addressPort;
   setStatus(`Selected stream endpoint: ${addressPort}`);
+  // The camera helper follows the address (saved with the settings below).
+  const host = parseAddressPort(addressPort).host;
+  const cameraHost = isValidIPv4(host) && host !== String(parameters.camera_ip || "").trim() ? host : "";
+  if (cameraHost) {
+    parameters.camera_ip = cameraHost;
+    showCameraPage();
+  }
 
   try {
     await saveParams(addressPort, outPath.value.trim(), currentOutputFilenameFromUI());
   } catch {
     // Ignore persistence failures for selection convenience.
+  }
+  if (cameraHost) {
+    setCameraNote(`address set to ${cameraHost}.`);
+    await restartCamera().catch((err) => logDebug(`Camera helper: ${normalizeError(err)}`));
   }
 }
 
@@ -1026,13 +1094,280 @@ function utf8Hex(text) {
 
 // Returns "" when this platform or architecture has no player; the app then
 // starts VLC as an external program, as it does on macOS.
-async function findPlayerBinary() {
+async function findHelperBinary(name) {
   const platform = NL_OS === "Windows" ? "win" : NL_OS === "Linux" ? "linux" : "";
   if (!platform) return "";
-  // The AppImage keeps the player in its read-only image, and NL_PATH is the settings folder there.
+  // The AppImage keeps the helpers in its read-only image, and NL_PATH is the settings folder there.
   const playerDir = await Neutralino.os.getEnv("VLC_REC_PLAYER_DIR") || `${NL_PATH}/player`;
-  const path = `${playerDir}/vlc-rec-player-${platform}_${NL_ARCH}${NL_OS === "Windows" ? ".exe" : ""}`;
+  const path = `${playerDir}/${name}-${platform}_${NL_ARCH}${NL_OS === "Windows" ? ".exe" : ""}`;
   return await pathExists(path) ? path : "";
+}
+
+async function findPlayerBinary() {
+  return findHelperBinary("vlc-rec-player");
+}
+
+// ---- optional camera control ----
+// vlc-rec-camera (native/vlc-rec-camera.c) speaks OSC to the camera; the frontend has no
+// socket API, so it talks to that helper through stdin and stdout, as it does with the player.
+
+function numberParam(value, fallback, min, max) {
+  const number = Number(value);
+  return Number.isFinite(number) && number >= min && number <= max ? number : fallback;
+}
+
+function cameraAddress() {
+  const address = String(parameters.camera_ip || "").trim();
+  return isValidIPv4(address) ? address : "";
+}
+
+function cameraActive() {
+  return Boolean(cameraProc && !cameraProc.exited);
+}
+
+// The camera's own control page (where, for example, the SD card can be formatted) opens in the web
+// browser of the system: it needs no more than the address of the camera.
+function cameraPageUrl() {
+  const address = cameraAddress();
+  return address ? `http://${address}/` : "";
+}
+
+function showCameraPage() {
+  const address = cameraAddress();
+  cameraPage.hidden = !address;
+  cameraAddressText.textContent = address;
+}
+
+async function openCameraPage() {
+  const url = cameraPageUrl();
+  if (!url) return;
+  try {
+    await Neutralino.os.open(url);
+  } catch (err) {
+    logDebug(`Could not open ${url}: ${normalizeError(err)}`);
+    setCameraNote(`could not open ${url} in the browser.`);
+  }
+}
+
+function setCameraNote(text) {
+  cameraNote = text;
+  cameraNoteUntil = Date.now() + CAMERA_NOTE_MS;
+}
+
+function withCameraNote(text) {
+  if (!cameraNote || Date.now() > cameraNoteUntil) return text;
+  return text ? `${text} Camera: ${cameraNote}` : `Camera: ${cameraNote}`;
+}
+
+async function startCamera() {
+  if (cameraProc) return;
+  const address = String(parameters.camera_ip || "").trim();
+  if (!address) return;
+  if (!cameraAddress()) {
+    logDebug(`camera_ip '${address}' is not an IPv4 address; camera controls are off.`);
+    return;
+  }
+  const binary = await findHelperBinary("vlc-rec-camera");
+  if (!binary) {
+    logDebug("The camera helper was not found; camera controls are off.");
+    return;
+  }
+  const command = buildCommand(binary, [
+    "--ip", address,
+    "--hfov", String(numberParam(parameters.camera_hfov_deg, DEFAULT_PARAMS.camera_hfov_deg, 10, 170)),
+    "--zoom-ratio", String(numberParam(parameters.camera_zoom_ratio, DEFAULT_PARAMS.camera_zoom_ratio, 1, 100)),
+    "--zoom-max", String(Math.round(numberParam(parameters.camera_zoom_max, DEFAULT_PARAMS.camera_zoom_max, 1, 100))),
+    "--speed", String(cameraTurnSpeed()),
+    "--nudge-speed", String(Math.round(numberParam(parameters.camera_arrow_speed, DEFAULT_PARAMS.camera_arrow_speed, 1, 90)))
+  ]);
+  logDebug(`Starting the camera helper: ${command}`);
+  const info = await Neutralino.os.spawnProcess(command);
+  cameraProc = { id: info.id, lineBuffer: "", exited: false };
+  showCameraSpeed();
+  showCameraControls(true);
+}
+
+// The panel is arranged differently with the camera controls, so a change arranges it again.
+function showCameraControls(visible) {
+  cameraBar.hidden = !visible;
+  layoutEl.dataset.camera = visible ? "on" : "off";
+  updateLayout();
+}
+
+function stopCamera() {
+  const proc = cameraProc;
+  if (!proc || proc.exited) return;
+  Neutralino.os.updateSpawnedProcess(proc.id, "stdIn", "STOP\n").catch(() => {});
+}
+
+// Stops the helper, waits until it is gone (it holds the port the camera answers to), starts it
+// again with the current settings.
+async function restartCamera() {
+  const proc = cameraProc;
+  if (proc) {
+    proc.restarting = true;
+    stopCamera();
+    for (let i = 0; i < 15 && cameraProc === proc; i++) await new Promise((resolve) => setTimeout(resolve, 200));
+    if (cameraProc === proc) {
+      Neutralino.os.updateSpawnedProcess(proc.id, "exit").catch(() => {});
+      proc.exited = true;
+      cameraProc = null;
+    }
+  }
+  await startCamera();
+}
+
+function cameraTurnSpeed() {
+  return Math.round(numberParam(parameters.camera_turn_speed, DEFAULT_PARAMS.camera_turn_speed, 1, 90));
+}
+
+function showCameraSpeedValue(speed) {
+  cameraSpeedValue.textContent = `${speed} °/s`;
+}
+
+// The slider takes whole degrees per second, 1 to 90, as the setting does.
+function showCameraSpeed() {
+  const current = cameraTurnSpeed();
+  cameraSpeed.value = String(current);
+  showCameraSpeedValue(current);
+}
+
+function sliderSpeed() {
+  const speed = Math.round(Number(cameraSpeed.value));
+  return speed >= 1 && speed <= 90 ? speed : 0;
+}
+
+// While the slider is dragged: only the number next to it follows.
+function handleCameraSpeedInput() {
+  const speed = sliderSpeed();
+  if (speed) showCameraSpeedValue(speed);
+}
+
+// When it is let go: the helper and the settings file get the new speed.
+function handleCameraSpeedChange() {
+  const speed = sliderSpeed();
+  if (!speed) return;
+  showCameraSpeedValue(speed);
+  parameters.camera_turn_speed = speed;
+  sendCameraCommand(`SPEED ${speed}`);
+  saveParams(parameters.ip_address, parameters.output_path, parameters.output_filename).catch(() => {});
+}
+
+// The picture lags behind the camera, so a click right after a turn aims at an out of date
+// picture: the next click waits until the turn is over (it starts after a moment) and the picture
+// has caught up.
+function extendCameraBusy(turn) {
+  // The helper reports how long the turn takes; older helpers do not, then it follows from the speed.
+  const degrees = Math.max(Math.abs(turn.toPan - turn.fromPan), Math.abs(turn.toTilt - turn.fromTilt));
+  const turnMs = Number.isFinite(turn.durationMs) ? turn.durationMs : degrees / cameraTurnSpeed() * 1000;
+  cameraBusyUntil = Math.max(cameraBusyUntil, Date.now() + CAMERA_TURN_START_MS + turnMs + CAMERA_PICTURE_LAG_MS);
+}
+
+function sendCameraCommand(line) {
+  if (!cameraActive()) return false;
+  Neutralino.os.updateSpawnedProcess(cameraProc.id, "stdIn", `${line}\n`).catch(() => {});
+  return true;
+}
+
+function handleCameraOutput(chunk) {
+  cameraProc.lineBuffer += chunk;
+  const lines = cameraProc.lineBuffer.split("\n");
+  cameraProc.lineBuffer = lines.pop();
+  for (const line of lines) {
+    let message;
+    try {
+      message = JSON.parse(line);
+    } catch {
+      continue;
+    }
+    logDebug(`Camera: ${line.trim()}`);
+    if (message.event === "turned" && message.moved) extendCameraBusy(message);
+    if (message.event === "error") setCameraNote(String(message.message || message.code || "error"));
+    if (message.event === "ready" && message.answered === false) setCameraNote("the camera does not answer; check camera_ip.");
+  }
+}
+
+function handleCameraProcessEvent(evt) {
+  if (!evt || !evt.detail || !cameraProc || evt.detail.id !== cameraProc.id) return;
+  const detail = evt.detail;
+  if (detail.action === "stdOut") {
+    handleCameraOutput(String(detail.data || ""));
+  } else if (detail.action === "exit") {
+    const restarting = cameraProc.restarting;
+    cameraProc.exited = true;
+    cameraProc = null;
+    showCameraControls(false);
+    if (!restarting) setCameraNote("the camera helper stopped.");
+  }
+}
+
+// x and y: where the click fell on the picture, 0..1 from its top left corner.
+function turnCameraTo(x, y) {
+  if (!cameraActive() || mode === "idle" || !scanDialog.hidden) return;
+  if (!(x >= 0 && x <= 1 && y >= 0 && y <= 1)) return;
+  // A click in the middle needs no turn, and a double click must not turn twice.
+  if (Math.abs(x - 0.5) < 0.02 && Math.abs(y - 0.5) < 0.02) return;
+  if (Date.now() < cameraBusyUntil) return;
+  cameraBusyUntil = Date.now() + CAMERA_CLICK_COOLDOWN_MS;
+  sendCameraCommand(`CENTER ${x.toFixed(4)} ${y.toFixed(4)} ${videoAspect.toFixed(4)}`);
+}
+
+function cameraZoomStep() {
+  return Math.round(numberParam(parameters.camera_zoom_step, DEFAULT_PARAMS.camera_zoom_step, 1, 50));
+}
+
+function zoomCamera(delta) {
+  if (!cameraActive()) return;
+  sendCameraCommand(`ZOOM ${delta}`);
+}
+
+function handleVideoClick(evt) {
+  const rect = videoHost.getBoundingClientRect();
+  if (!(rect.width > 0 && rect.height > 0)) return;
+  turnCameraTo((evt.clientX - rect.left) / rect.width, (evt.clientY - rect.top) / rect.height);
+}
+
+// A wheel notch is half a button step. Wheel up zooms in.
+function handleStageWheel(evt) {
+  if (!cameraActive() || !scanDialog.hidden) return;
+  evt.preventDefault();
+  const now = Date.now();
+  if (now - lastWheelAt < CAMERA_WHEEL_INTERVAL_MS) return;
+  lastWheelAt = now;
+  const step = Math.max(1, Math.round(cameraZoomStep() / 2));
+  zoomCamera(evt.deltaY < 0 ? step : -step);
+}
+
+const ARROW_DIRECTIONS = {
+  ArrowLeft: [-1, 0],
+  ArrowRight: [1, 0],
+  ArrowUp: [0, 1],
+  ArrowDown: [0, -1]
+};
+
+// Arrow keys turn the camera while no text field has the focus; Shift makes the step five times larger.
+// Key repeat is thinned out, and the helper builds each step on the previous target.
+function handleArrowKey(evt) {
+  const direction = ARROW_DIRECTIONS[evt.key];
+  if (!direction || !cameraActive() || !scanDialog.hidden) return;
+  if (evt.ctrlKey || evt.altKey || evt.metaKey) return;
+  const tag = evt.target && evt.target.tagName ? String(evt.target.tagName).toUpperCase() : "";
+  if (tag === "INPUT" || tag === "TEXTAREA" || tag === "SELECT" || (evt.target && evt.target.isContentEditable)) return;
+  evt.preventDefault();
+  const now = Date.now();
+  if (now - lastNudgeAt < CAMERA_NUDGE_INTERVAL_MS) return;
+  lastNudgeAt = now;
+  // The camera takes whole degrees.
+  const step = Math.max(1, Math.round(numberParam(parameters.camera_arrow_step_deg, DEFAULT_PARAMS.camera_arrow_step_deg, 1, 20))) * (evt.shiftKey ? 5 : 1);
+  sendCameraCommand(`NUDGE ${direction[0] * step} ${direction[1] * step}`);
+}
+
+function handleKeyDown(evt) {
+  if (evt.key === "Escape" && !scanDialog.hidden) {
+    closeScanDialog();
+    return;
+  }
+  handleArrowKey(evt);
 }
 
 function videoRectArg() {
@@ -1041,8 +1376,67 @@ function videoRectArg() {
   return [rect.left, rect.top, rect.width, rect.height].map((value) => Math.round(value * scale)).join(",");
 }
 
+// What the user types is limited only to what VLC takes. How small a buffer can be without freezing the
+// picture depends on the network and the computer (a 4K stream decoded in software froze at 150 ms
+// on a LAN in a container), so the field does not guess; the hint under it says what to look for.
+const PREVIEW_CACHING_MIN_MS = 0;
+const PREVIEW_CACHING_FIELD_MAX_MS = 10000;
+
+// Network caching in ms for the player, or -1 for VLC's own default.
+function previewCachingMs() {
+  const value = Number(parameters.preview_caching_ms);
+  if (!Number.isFinite(value)) return DEFAULT_PARAMS.preview_caching_ms;
+  return value < 0 ? -1 : Math.min(60000, Math.max(PREVIEW_CACHING_MIN_MS, Math.round(value)));
+}
+
+function describeCaching(ms) {
+  return ms < 0 ? "VLC's default (1000 ms)" : `${ms} ms`;
+}
+
+// The field shows the buffer in the settings (a setting of -1, VLC's own default, is VLC's 1000); a
+// note appears while the running preview or recording still has another one.
+function showPreviewCaching() {
+  if (document.activeElement !== previewCaching) {
+    const value = previewCachingMs();
+    previewCaching.value = String(value < 0 ? 1000 : value);
+  }
+  const proc = currentProcess;
+  const stale = proc && proc.type === "real" && !proc.exited && proc.cachingMs !== undefined && proc.cachingMs !== previewCachingMs();
+  bufferPending.hidden = !stale;
+  bufferApplyBtn.hidden = !(stale && mode === "preview");
+  if (!stale) return;
+  bufferPendingText.textContent = mode === "preview"
+    ? `Not in use yet: the running preview has ${describeCaching(proc.cachingMs)}.`
+    : `Not in use yet: the running recording keeps ${describeCaching(proc.cachingMs)}; the next start takes the new one.`;
+}
+
+function handlePreviewCachingChange() {
+  const typed = Math.round(Number(previewCaching.value));
+  const value = Number.isFinite(typed) && previewCaching.value !== ""
+    ? Math.min(PREVIEW_CACHING_FIELD_MAX_MS, Math.max(PREVIEW_CACHING_MIN_MS, typed))
+    : DEFAULT_PARAMS.preview_caching_ms;
+  parameters.preview_caching_ms = value;
+  previewCaching.value = String(value);
+  showPreviewCaching();
+  saveParams(parameters.ip_address, parameters.output_path, parameters.output_filename)
+    .catch((err) => logDebug(`Could not save the preview buffer: ${normalizeError(err)}`));
+}
+
+// Stops the running preview and starts it again, so that it has the buffer of the field. Only a
+// preview: a recording must not be cut.
+function restartPreview() {
+  return withBusy(async () => {
+    if (mode !== "preview") return;
+    await terminateCurrent("Restarting the preview...");
+    const result = await startOperation({ record: false, ...payload() });
+    await refreshState();
+    if (!result.ok) await showError(result.error);
+  });
+}
+
 function buildPlayerCommand(playerPath, streamUri, record, ext, fullOutput, rect) {
   const args = ["--parent-pid", String(NL_PID), "--url-hex", utf8Hex(streamUri), "--rect", rect];
+  if (previewCachingMs() >= 0) args.push("--caching", String(previewCachingMs()));
   if (record) args.push("--record-hex", utf8Hex(fullOutput), "--mux", ext === "mp4" ? "mp4" : "mkv");
   return buildCommand(playerPath, args);
 }
@@ -1064,13 +1458,35 @@ function handlePlayerOutput(proc, chunk) {
     } catch {
       continue;
     }
-    if (message.event === "stats") proc.readBytes = message.readBytes;
+    if (message.event === "stats") {
+      proc.readBytes = message.readBytes;
+      noteStats(proc, message);
+    }
     if (message.event === "video") setVideoSize(message);
     if (message.event === "error") {
       proc.errorMessage = String(message.message || "");
       logDebug(`Player error ${message.code}: ${proc.errorMessage}`);
     }
+    // libVLC's own warnings and errors, and the window tree of the player: the way to tell why a
+    // picture stays black.
+    if (message.event === "log") logDebug(`libVLC ${message.level} [${message.module}] ${message.text}`);
+    if (message.event === "window") logDebug(`Player ${message.text}`);
   }
+}
+
+const PLAYER_STATE_NAMES = ["idle", "opening", "buffering", "playing", "paused", "stopped", "ended", "error"];
+const PLAYER_STATS_LOGGED = new Set([2, 5, 15]);
+
+// Written to the log when the state changes and at a few of the first stats of a process: enough to
+// see whether data arrives, is decoded and is shown, without a line per second for a whole recording.
+function noteStats(proc, message) {
+  proc.statsSeen = (proc.statsSeen || 0) + 1;
+  const changed = message.state !== proc.lastState;
+  proc.lastState = message.state;
+  if (!changed && !PLAYER_STATS_LOGGED.has(proc.statsSeen)) return;
+  const state = PLAYER_STATE_NAMES[message.state] || String(message.state);
+  logDebug(`Player ${state}: ${message.readBytes} bytes read, ${message.decoded ?? "?"} pictures decoded, ` +
+    `${message.displayed ?? "?"} shown, ${message.lost ?? "?"} lost`);
 }
 
 // Display aspect ratio from the player's "video" event; anamorphic video has a
@@ -1121,11 +1537,6 @@ function layoutClassName(layout) {
 
 function applyLayoutClass(layout) {
   layoutEl.className = layoutClassName(layout);
-  // Fonts differ between systems, so whether a full button label fits is measured.
-  panel.classList.remove("short-labels");
-  if (!layout.compact && [recordBtn, previewBtn].some((button) => button.scrollWidth > button.clientWidth + 1)) {
-    panel.classList.add("short-labels");
-  }
 }
 
 function syncPlayerRect() {
@@ -1139,7 +1550,7 @@ function syncPlayerRect() {
 
 function layoutInputKey() {
   return [window.innerWidth, window.innerHeight, window.devicePixelRatio, videoAspect, mode,
-    startingStream, panelOverride, videoHost.hidden].join("|");
+    startingStream, panelOverride, videoHost.hidden, cameraBar.hidden, cameraPage.hidden].join("|");
 }
 
 // Measuring switches the panel through every layout, which can clamp its scroll
@@ -1500,6 +1911,7 @@ async function currentState() {
   return {
     mode,
     status: statusText,
+    statusKind,
     elapsed: formatElapsed(elapsedSec),
     fileSize: currentFileSize,
     fields: outputFields()
@@ -1558,8 +1970,8 @@ async function nextReconnectFilename(session) {
 async function reconnectSession(session, reason) {
   if (activeSession !== session || !parameters.auto_reconnect || uiBusy) return;
   await withBusy(async () => {
-    statusText = `${reason} Reconnecting VLC...`;
-    setStatus(statusText);
+    noteStatus(`${reason} Reconnecting VLC...`, "warn");
+    setStatus(statusText, statusKind);
     logDebug(statusText);
     try {
       const proc = currentProcess;
@@ -1575,11 +1987,11 @@ async function reconnectSession(session, reason) {
       if (closeRequested) return;
       const result = await startOperation({ ...request, recoverySession: session });
       if (!result.ok) throw new Error(result.error);
-      statusText = `Automatically reconnected. ${statusText}`;
+      noteStatus(`Automatically reconnected. ${statusText}`);
     } catch (err) {
       // Keep the user's operation active and retry without any modal dialogs.
       session.nextRetryAt = Date.now() + RECONNECT_RETRY_MS;
-      statusText = `Reconnect failed: ${normalizeError(err)} Retrying in 5 seconds.`;
+      noteStatus(`Reconnect failed: ${normalizeError(err)} Retrying in 5 seconds.`, "error");
       logDebug(statusText);
     }
     await refreshState();
@@ -1637,12 +2049,12 @@ async function monitorStream() {
       session.previewProgress = progress;
       if (session.previewUnavailable) {
         session.previewUnavailable = false;
-        statusText = "Preview monitoring available.";
+        noteStatus("Preview monitoring available.");
       }
     } else if (session.previewProgress === null) {
       if (now - session.lastProgressAt >= stallTimeoutMs() && !session.previewUnavailable) {
         session.previewUnavailable = true;
-        statusText = "Preview monitoring unavailable: VLC RC statistics could not be read. Process exits are still monitored.";
+        noteStatus("Preview monitoring unavailable: VLC RC statistics could not be read. Process exits are still monitored.", "warn");
       }
       return;
     }
@@ -1690,13 +2102,14 @@ async function startOperation({ record, ipAddress, outputPathValue, filenameBase
       streamUri = buildPlaybackUri(ipAddress);
     } catch (err) {
       const message = normalizeError(err);
-      if (!recoverySession) resetState(message);
+      if (!recoverySession) resetState(message, "error");
       return { ok: false, error: message };
     }
   }
 
   const playerPath = simMode ? "" : await findPlayerBinary();
   const args = ["--no-one-instance", "--stats", streamUri];
+  if (previewCachingMs() >= 0) args.splice(2, 0, `--network-caching=${previewCachingMs()}`);
 
   let rcHost = "";
   if (!simMode && !playerPath && (NL_OS === "Linux" || NL_OS === "Darwin" || NL_OS === "Windows")) {
@@ -1749,6 +2162,7 @@ async function startOperation({ record, ipAddress, outputPathValue, filenameBase
         player: Boolean(playerPath),
         // A later layout change sends RECT only when it differs from this.
         sentRect: startRect,
+        cachingMs: previewCachingMs(),
         readBytes: null,
         lineBuffer: "",
         errorMessage: ""
@@ -1762,7 +2176,7 @@ async function startOperation({ record, ipAddress, outputPathValue, filenameBase
     startingStream = false;
     const message = friendlySpawnError(err);
     logDebug(`Failed to spawn VLC: ${message}`);
-    if (!recoverySession) resetState(message);
+    if (!recoverySession) resetState(message, "error");
     return { ok: false, error: message };
   }
 
@@ -1772,13 +2186,13 @@ async function startOperation({ record, ipAddress, outputPathValue, filenameBase
   resetSessionProgress(activeSession);
   startTimeMs = Date.now();
   outputFile = record ? fullOutput : "";
-  statusText = simMode
+  noteStatus(simMode
     ? record
       ? `SIMULATION started. Recording to '${fullOutput}'.`
       : "SIMULATION started in preview mode."
     : record
       ? `VLC started. Recording to '${fullOutput}'.`
-      : "VLC started in preview mode.";
+      : "VLC started in preview mode.");
 
   return { ok: true };
 }
@@ -1792,33 +2206,20 @@ function payload() {
   };
 }
 
-// The short label is for the compact layout and for buttons too narrow for the full one.
-function setButtonLabel(button, full, short) {
-  if (button.dataset.label === full) return;
-  button.dataset.label = full;
-  const fullLabel = document.createElement("span");
-  fullLabel.className = "btn-label-full";
-  fullLabel.textContent = full;
-  const shortLabel = document.createElement("span");
-  shortLabel.className = "btn-label-short";
-  shortLabel.textContent = short;
-  button.replaceChildren(fullLabel, shortLabel);
-}
-
 function updateButtons() {
   let basePreviewDisabled = false;
 
   if (mode === "recording") {
-    setButtonLabel(recordBtn, "Stop Recording", "Stop Recording");
-    setButtonLabel(previewBtn, "Preview Only", "Preview");
+    recordBtn.textContent = "Stop Recording";
+    previewBtn.textContent = "Preview";
     basePreviewDisabled = true;
   } else if (mode === "preview") {
-    setButtonLabel(recordBtn, "Start Recording", "Record");
-    setButtonLabel(previewBtn, "Stop Preview", "Stop Preview");
+    recordBtn.textContent = "Record";
+    previewBtn.textContent = "Stop Preview";
     basePreviewDisabled = false;
   } else {
-    setButtonLabel(recordBtn, "Start Recording", "Record");
-    setButtonLabel(previewBtn, "Preview Only", "Preview");
+    recordBtn.textContent = "Record";
+    previewBtn.textContent = "Preview";
     basePreviewDisabled = false;
   }
 
@@ -1828,6 +2229,7 @@ function updateButtons() {
   browseBtn.disabled = locked;
   scanBtn.disabled = uiBusy || scanState.running;
   autoReconnect.disabled = uiBusy;
+  bufferApplyBtn.disabled = uiBusy;
 }
 
 function applyState(state) {
@@ -1838,8 +2240,13 @@ function applyState(state) {
   modeBadge.hidden = mode === "idle";
   modeBadge.className = `mode-badge is-${mode}`;
   modeBadge.textContent = mode === "recording" ? "REC" : mode === "preview" ? "PREVIEW" : "";
-  setStatus(state.status || "");
+  const shown = withCameraNote(state.status || "");
+  // A message from the camera helper makes an otherwise plain status a warning.
+  const kind = state.statusKind || "info";
+  setStatus(shown, shown !== (state.status || "") && kind === "info" ? "warn" : kind);
   autoReconnect.checked = Boolean(parameters.auto_reconnect);
+  showPreviewCaching();
+  showCameraPage();
 
   if (state.fields && scanDialog.hidden) {
     if (document.activeElement !== ip) ip.value = state.fields.ip_address || "";
@@ -1906,9 +2313,9 @@ async function handleSpawnedProcessEvent(evt) {
     currentProcess.exited = true;
     if (parameters.auto_reconnect && activeSession) {
       activeSession.nextRetryAt = Date.now() + RECONNECT_RETRY_MS;
-      statusText = currentProcess.errorMessage
+      noteStatus(currentProcess.errorMessage
         ? `${currentProcess.errorMessage} Automatically reconnecting in 5 seconds...`
-        : "VLC exited. Automatically reconnecting in 5 seconds...";
+        : "VLC exited. Automatically reconnecting in 5 seconds...", "warn");
       logDebug(`VLC exited; reconnect scheduled. ${currentProcess.output || ""}`);
       await refreshState();
       return;
@@ -1922,10 +2329,10 @@ async function handleSpawnedProcessEvent(evt) {
       const preferred = lines.findLast((line) => /(error|unknown|invalid|missing|not found|failed)/i.test(line));
       const detailLine = preferred || lines[lines.length - 1] || "VLC exited.";
       const cleanLast = detailLine.length > 220 ? `${detailLine.slice(0, 217)}...` : detailLine;
-      resetState(`Stopped. ${cleanLast}`);
+      resetState(`Stopped. ${cleanLast}`, "error");
       logDebug(`VLC process exited. Last output: ${cleanLast}`);
     } else {
-      resetState("Stopped. VLC process exited with no output.");
+      resetState("Stopped. VLC process exited with no output.", "warn");
       logDebug("VLC process exited with no captured output.");
     }
     await refreshState();
@@ -1940,10 +2347,12 @@ async function init() {
   Neutralino.events.on("spawnedProcess", (evt) => {
     handleSpawnedProcessEvent(evt).catch(() => {});
     handleProbeSpawnedProcessEvent(evt);
+    handleCameraProcessEvent(evt);
   });
 
   Neutralino.events.on("windowClose", () => {
     closeRequested = true;
+    stopCamera();
     withBusy(async () => {}).catch(() => {});
   });
 
@@ -1952,6 +2361,7 @@ async function init() {
   layoutReady = true;
   await refreshState();
   ensureBashAvailable().catch(() => {});
+  startCamera().catch((err) => logDebug(`Camera helper: ${normalizeError(err)}`));
 
   window.addEventListener("resize", () => updateLayout());
   // The stage can also change size without a window resize, for example when a
@@ -1981,8 +2391,8 @@ autoReconnect.addEventListener("change", () => {
   }
   saveParams(parameters.ip_address, parameters.output_path, parameters.output_filename)
     .catch((err) => {
-      statusText = `Could not save automatic reconnect setting: ${normalizeError(err)}`;
-      setStatus(statusText);
+      noteStatus(`Could not save automatic reconnect setting: ${normalizeError(err)}`, "error");
+      setStatus(statusText, statusKind);
     });
   refreshState().catch(() => {});
 });
@@ -2098,11 +2508,20 @@ scanDialog.addEventListener("click", (evt) => {
   }
 });
 
-window.addEventListener("keydown", (evt) => {
-  if (evt.key === "Escape" && !scanDialog.hidden) {
-    closeScanDialog();
-  }
-});
+// The native video window may or may not pass mouse input on to the page, depending on the
+// platform; both are plain page events here.
+videoHost.addEventListener("click", handleVideoClick);
+stage.addEventListener("wheel", handleStageWheel, { passive: false });
+zoomInBtn.addEventListener("click", () => zoomCamera(cameraZoomStep()));
+zoomOutBtn.addEventListener("click", () => zoomCamera(-cameraZoomStep()));
+cameraPageBtn.addEventListener("click", () => openCameraPage().catch(() => {}));
+cameraSpeed.addEventListener("input", handleCameraSpeedInput);
+cameraSpeed.addEventListener("change", handleCameraSpeedChange);
+// A slider that keeps the focus would take the arrow keys, which turn the camera.
+cameraSpeed.addEventListener("pointerup", () => cameraSpeed.blur());
+previewCaching.addEventListener("change", handlePreviewCachingChange);
+bufferApplyBtn.addEventListener("click", () => restartPreview().catch(() => {}));
+window.addEventListener("keydown", handleKeyDown);
 
 init().catch(async (err) => {
   await showError(normalizeError(err));

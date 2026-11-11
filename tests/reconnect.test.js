@@ -20,6 +20,8 @@ function harness() {
   const events = new Map();
   const timeouts = [];
   const stdin = [];
+  const opened = [];
+  const logs = [];
   const env = new Map();
   const element = (id) => {
     if (!elements.has(id)) elements.set(id, {
@@ -28,6 +30,7 @@ function harness() {
       addEventListener(name, handler) { this[name] = handler; },
       setAttribute(name, value) { this.attributes[name] = value; }, focus() {},
       replaceChildren(...children) { this.children = children; },
+      blur() {},
       getBoundingClientRect() { return { left: 10, top: 20, width: 640, height: 360 }; }
     });
     return elements.get(id);
@@ -36,8 +39,10 @@ function harness() {
     async getEnv(name) { return env.get(name) || ""; },
     async spawnProcess(command) {
       // A second connection may open only after the previous VLC has exited.
-      assert.equal(live.size, 0);
-      const proc = { id: nextId++, pid: nextId + 1000 };
+      // The camera helper runs alongside and does not count.
+      const camera = command.includes("vlc-rec-camera");
+      if (!camera) assert.equal([...live.values()].filter((p) => !p.camera).length, 0);
+      const proc = { id: nextId++, pid: nextId + 1000, camera };
       live.set(proc.id, proc);
       launches.push(command);
       return proc;
@@ -49,6 +54,7 @@ function harness() {
       return { exitCode: 0, stdOut: "" };
     },
     async getSpawnedProcesses() { return [...live.values()]; },
+    async open(url) { if (os.openFails) throw new Error("no browser"); opened.push(url); },
     async updateSpawnedProcess(id, action, data) {
       actions.push(action);
       if (action === "stdIn") stdin.push(data);
@@ -72,7 +78,7 @@ function harness() {
     TextEncoder,
     Date: class extends Date { static now() { return now; } },
     Neutralino: {
-      os, filesystem, init() {}, debug: { async log() {} },
+      os, filesystem, init() {}, debug: { async log(message) { logs.push(String(message)); } },
       events: { on(name, fn) { events.set(name, fn); } },
       app: { async exit() { actions.push("app-exit"); } }
     },
@@ -88,7 +94,7 @@ function harness() {
   const run = (code) => runInContext(code, context);
   run("parameters.auto_reconnect = true");
   return {
-    files, live, launches, actions, os, elements, events, timeouts, run, stdin, env,
+    files, live, launches, actions, os, elements, events, timeouts, run, stdin, env, opened, logs,
     advance(ms) { now += ms; },
     enablePlayer() { files.set("/app/player/vlc-rec-player-win_x64.exe", 1); },
     async playerOutput(data) {
@@ -496,6 +502,31 @@ test("preview progress comes from stats lines split across chunks; a frozen coun
   assert.equal(h.run("currentProcess.readBytes"), null);
 });
 
+test("the log says what libVLC reports and how far the pictures get, without a line per second", async () => {
+  const h = harness();
+  h.enablePlayer();
+  await h.start(false);
+  await h.playerOutput('{"event":"log","level":"warning","module":"direct3d11","text":"swapchain failed"}\n');
+  await h.playerOutput('{"event":"window","text":"player window 900x500 visible, parent 900x500, 1 child windows; VLC video output 900x500 visible"}\n');
+  assert.ok(h.logs.includes("libVLC warning [direct3d11] swapchain failed"), h.logs.join("\n"));
+  assert.ok(h.logs.some((line) => /^Player player window 900x500 visible.*VLC video output/.test(line)), h.logs.join("\n"));
+
+  const stats = (state, bytes, decoded, displayed) =>
+    `{"event":"stats","state":${state},"readBytes":${bytes},"decoded":${decoded},"displayed":${displayed},"lost":0}\n`;
+  for (let i = 0; i < 20; i += 1) await h.playerOutput(stats(3, 1000 * (i + 1), i * 25, 0));
+  const stateLines = () => h.logs.filter((line) => /^Player (idle|opening|buffering|playing|paused|stopped|ended|error):/.test(line));
+  // The first stats (a new state), the 2nd, 5th and 15th: four lines of twenty.
+  assert.equal(stateLines().length, 4, stateLines().join("\n"));
+  assert.match(stateLines()[0], /^Player playing: 1000 bytes read, 0 pictures decoded, 0 shown, 0 lost$/);
+
+  await h.playerOutput(stats(7, 0, 5, 0));
+  assert.match(stateLines().at(-1), /^Player error: /, "a change of state is always written");
+
+  // A player of an older build has no picture counters.
+  await h.playerOutput('{"event":"stats","state":2,"readBytes":3}\n');
+  assert.match(stateLines().at(-1), /^Player buffering: 3 bytes read, \? pictures decoded, \? shown, \? lost$/);
+});
+
 test("a player stops through stdin and gets time to finalize its file", async () => {
   const h = harness();
   h.enablePlayer();
@@ -733,10 +764,10 @@ test("the stream's aspect ratio sizes the video box, and spare width widens the 
   assert.equal(h.panel.style.width, "384px");
   assert.deepEqual([h.host.width, h.host.height, h.host.left, h.host.top], ["896px", "672px", "0px", "24px"]);
 
-  // 4:3 in a 21:9 window: the side panel takes 136 px of the spare width, the rest is centered.
+  // 4:3 in a 21:9 window: the side panel takes 176 px of the spare width (up to its largest width, 560 px), the rest is centered.
   h.resize(ROOM_21_9_WINDOW);
-  assert.equal(h.panel.style.width, "520px");
-  assert.deepEqual([h.host.width, h.host.height, h.host.left, h.host.top], ["960px", "720px", "100px", "0px"]);
+  assert.equal(h.panel.style.width, "560px");
+  assert.deepEqual([h.host.width, h.host.height, h.host.left, h.host.top], ["960px", "720px", "80px", "0px"]);
 
   await h.run("stopOperation()");
   assert.equal(h.run("videoAspect"), 4 / 3, "the last aspect ratio stays after the player stops");
@@ -793,4 +824,478 @@ test("Windows RC statistics command reads a real TCP response and handles a clos
     await new Promise((done) => server.close(done));
   }
   await assert.rejects(h.run(`readPreviewProgress('127.0.0.1:${port}')`));
+});
+
+// ---- optional camera control ----
+
+function cameraHarness() {
+  const h = harness();
+  h.files.set("/app/player/vlc-rec-camera-win_x64.exe", 1);
+  h.run('parameters.camera_ip = "192.168.1.50"');
+  return h;
+}
+
+const cameraLines = (h) => h.stdin.filter((line) => /^(CENTER|ZOOM|NUDGE|SPEED|STOP)/.test(line));
+
+test("camera: the helper starts with the settings, and only then the zoom buttons show", async () => {
+  const h = cameraHarness();
+  assert.equal(h.elements.get("cameraBar") && h.elements.get("cameraBar").hidden, true);
+  await h.run("startCamera()");
+  assert.equal(h.launches.length, 1);
+  assert.match(h.launches[0], /vlc-rec-camera-win_x64\.exe"/);
+  for (const pair of ['"--ip" "192.168.1.50"', '"--hfov" "76"', '"--zoom-ratio" "4.6"', '"--zoom-max" "36"', '"--speed" "10"', '"--nudge-speed" "30"']) {
+    assert.ok(h.launches[0].includes(pair), `${pair} in ${h.launches[0]}`);
+  }
+  assert.equal(h.elements.get("cameraBar").hidden, false);
+});
+
+test("camera: no address, a bad address or no helper binary leaves the feature off", async () => {
+  const none = harness();
+  none.files.set("/app/player/vlc-rec-camera-win_x64.exe", 1);
+  await none.run("startCamera()");
+  assert.equal(none.launches.length, 0);
+
+  const bad = cameraHarness();
+  bad.run('parameters.camera_ip = "192.168.1.999"');
+  await bad.run("startCamera()");
+  assert.equal(bad.launches.length, 0);
+
+  const missing = harness();
+  missing.run('parameters.camera_ip = "192.168.1.50"');
+  await missing.run("startCamera()");
+  assert.equal(missing.launches.length, 0);
+  assert.equal(missing.elements.get("cameraBar").hidden, true);
+});
+
+test("camera: a click turns the camera, a second one waits, the middle and an idle app do nothing", async () => {
+  const h = cameraHarness();
+  await h.run("startCamera()");
+  // The video box of the harness is 640x360 at (10, 20); the stream aspect is 16:9.
+  h.run("handleVideoClick({ clientX: 490, clientY: 200 })");
+  assert.deepEqual(cameraLines(h), [], "nothing is turned while no stream runs");
+
+  assert.equal((await h.start(false)).ok, true);
+  h.run("handleVideoClick({ clientX: 490, clientY: 200 })");
+  assert.deepEqual(cameraLines(h), ["CENTER 0.7500 0.5000 1.7778\n"]);
+  h.run("handleVideoClick({ clientX: 100, clientY: 100 })");
+  assert.equal(cameraLines(h).length, 1, "a click right after a turn aims at an out of date picture");
+  h.advance(1100);
+  h.run("handleVideoClick({ clientX: 330, clientY: 200 })");
+  assert.equal(cameraLines(h).length, 1, "the middle needs no turn");
+  h.run("handleVideoClick({ clientX: 10, clientY: 20 })");
+  assert.equal(cameraLines(h)[1], "CENTER 0.0000 0.0000 1.7778\n");
+});
+
+test("camera: the aspect ratio of the stream goes with the click", async () => {
+  const h = cameraHarness();
+  await h.run("startCamera()");
+  await h.start(false);
+  h.run("videoAspect = 4 / 3");
+  h.run("handleVideoClick({ clientX: 650, clientY: 380 })");
+  assert.deepEqual(cameraLines(h), ["CENTER 1.0000 1.0000 1.3333\n"]);
+});
+
+test("camera: the wheel zooms by half a step per notch, thinned out; up is in", async () => {
+  const h = cameraHarness();
+  await h.run("startCamera()");
+  let prevented = 0;
+  h.run("globalThis.prevented = 0");
+  h.run("handleStageWheel({ deltaY: -100, preventDefault() { globalThis.prevented++; } })");
+  h.run("handleStageWheel({ deltaY: -100, preventDefault() { globalThis.prevented++; } })");
+  assert.deepEqual(cameraLines(h), ["ZOOM 2\n"], "key repeat style bursts are thinned out");
+  h.advance(200);
+  h.run("handleStageWheel({ deltaY: 100, preventDefault() { globalThis.prevented++; } })");
+  assert.deepEqual(cameraLines(h), ["ZOOM 2\n", "ZOOM -2\n"]);
+  assert.equal(h.run("globalThis.prevented"), 3, "the page does not scroll");
+  prevented = 0;
+  void prevented;
+});
+
+test("camera: the zoom buttons use the configured step", async () => {
+  const h = cameraHarness();
+  h.run("parameters.camera_zoom_step = 15");
+  await h.run("startCamera()");
+  h.elements.get("zoomInBtn").click();
+  h.elements.get("zoomOutBtn").click();
+  assert.deepEqual(cameraLines(h), ["ZOOM 15\n", "ZOOM -15\n"]);
+});
+
+test("camera: arrow keys nudge the pan and tilt unless a field is being edited", async () => {
+  const h = cameraHarness();
+  await h.run("startCamera()");
+  const key = (extra) => h.run(`handleKeyDown(${JSON.stringify({ key: "ArrowRight", target: { tagName: "BODY" }, ...extra })
+    .replace(/}$/, ", preventDefault() {} }")})`);
+  key({});
+  assert.deepEqual(cameraLines(h), ["NUDGE 2 0\n"]);
+  key({});
+  assert.equal(cameraLines(h).length, 1, "key repeat is thinned out");
+  h.advance(100);
+  key({ key: "ArrowUp", shiftKey: true });
+  h.advance(100);
+  key({ key: "ArrowLeft" });
+  h.advance(100);
+  key({ key: "ArrowDown" });
+  assert.deepEqual(cameraLines(h), ["NUDGE 2 0\n", "NUDGE 0 10\n", "NUDGE -2 0\n", "NUDGE 0 -2\n"]);
+
+  h.advance(100);
+  key({ target: { tagName: "INPUT" } });
+  key({ target: { tagName: "SELECT" } });
+  key({ ctrlKey: true });
+  key({ key: "a" });
+  assert.equal(cameraLines(h).length, 4, "typing, shortcuts and other keys are left alone");
+
+  h.elements.get("scanDialog").hidden = false;
+  key({});
+  assert.equal(cameraLines(h).length, 4, "not while a dialog is open");
+});
+
+test("camera: Escape still closes the scan dialog", () => {
+  const h = harness();
+  h.elements.get("scanDialog").hidden = false;
+  h.run('handleKeyDown({ key: "Escape", target: { tagName: "BODY" }, preventDefault() {} })');
+  assert.equal(h.elements.get("scanDialog").hidden, true);
+});
+
+test("camera: a message from the helper is shown with the status for a few seconds", async () => {
+  const h = cameraHarness();
+  await h.run("startCamera()");
+  const id = h.run("cameraProc.id");
+  const event = (detail) => h.run(`handleCameraProcessEvent({ detail: ${JSON.stringify({ id, ...detail })} })`);
+  event({ action: "stdOut", data: '{"event":"error","code":"no-reply","message":"The camera did not report its position."}\n' });
+  assert.equal(h.run("withCameraNote('Preview.')"), "Preview. Camera: The camera did not report its position.");
+  h.advance(7000);
+  assert.equal(h.run("withCameraNote('Preview.')"), "Preview.");
+
+  // A line split between two chunks is put together.
+  event({ action: "stdOut", data: '{"event":"ready","answ' });
+  event({ action: "stdOut", data: 'ered":false}\n' });
+  assert.match(h.run("withCameraNote('')"), /does not answer/);
+
+  event({ action: "exit" });
+  assert.equal(h.elements.get("cameraBar").hidden, true);
+  assert.equal(h.run("cameraActive()"), false);
+  h.run("handleVideoClick({ clientX: 490, clientY: 200 })");
+  assert.deepEqual(cameraLines(h), [], "nothing is sent to a helper that is gone");
+});
+
+test("camera: closing the window stops the helper", async () => {
+  const h = cameraHarness();
+  await h.run("startCamera()");
+  h.run("stopCamera()");
+  assert.deepEqual(cameraLines(h), ["STOP\n"]);
+});
+
+test("camera: the speed slider shows the configured speed, follows the thumb, and tells the helper when it is let go", async () => {
+  const h = cameraHarness();
+  h.run("parameters.camera_turn_speed = 30");
+  await h.run("startCamera()");
+  const slider = h.elements.get("cameraSpeed");
+  const readout = h.elements.get("cameraSpeedValue");
+  assert.equal(slider.value, "30");
+  assert.equal(readout.textContent, "30 °/s");
+  assert.match(h.launches[0], /"--speed" "30"/);
+
+  // Any whole speed from 1 to 90 can be set, not only a few.
+  slider.value = "7";
+  slider.input();
+  assert.equal(readout.textContent, "7 °/s", "the number follows the thumb");
+  assert.deepEqual(cameraLines(h), [], "but nothing is sent while it is dragged");
+  slider.change();
+  assert.deepEqual(cameraLines(h), ["SPEED 7\n"]);
+  assert.equal(h.run("parameters.camera_turn_speed"), 7);
+  assert.match(h.files.get("/app/vlc_rec_params.json"), /"camera_turn_speed": 7/, "the choice is saved");
+
+  slider.value = "90";
+  slider.change();
+  slider.value = "1";
+  slider.change();
+  assert.deepEqual(cameraLines(h), ["SPEED 7\n", "SPEED 90\n", "SPEED 1\n"]);
+
+  slider.value = "0"; // out of range: ignored
+  slider.change();
+  assert.equal(cameraLines(h).length, 3);
+});
+
+test("camera: the panel is arranged again when the camera controls appear and when the helper goes", async () => {
+  const h = cameraHarness();
+  const layout = h.elements.get("layout");
+  assert.notEqual(layout.dataset.camera, "on");
+  await h.run("startCamera()");
+  assert.equal(layout.dataset.camera, "on", "the CSS has layouts with the camera controls");
+  const withControls = h.run("layoutInputKey()");
+  const id = h.run("cameraProc.id");
+  h.run(`handleCameraProcessEvent({ detail: ${JSON.stringify({ id, action: "exit" })} })`);
+  assert.equal(layout.dataset.camera, "off");
+  assert.notEqual(h.run("layoutInputKey()"), withControls, "a change of the controls makes a new layout pass");
+});
+
+test("the status line is plain, and a warning or an error says so", async () => {
+  const h = harness();
+  const status = h.elements.get("status");
+  await h.start(false);
+  await h.run("refreshState()");
+  assert.equal(status.dataset.kind, "info");
+  assert.match(status.textContent, /VLC started in preview mode/);
+
+  // The stream stops and nothing reconnects it: the process ends with a message.
+  h.run("currentProcess.errorMessage = 'Cannot open the stream.'");
+  await h.run("parameters.auto_reconnect = false");
+  await h.exit();
+  assert.equal(status.dataset.kind, "error");
+  assert.match(status.textContent, /Cannot open the stream/);
+
+  // With reconnecting on, the wait for the next try is a warning, a started preview plain again.
+  const again = harness();
+  const line = again.elements.get("status");
+  await again.start(false);
+  await again.exit();
+  assert.equal(line.dataset.kind, "warn");
+  assert.match(line.textContent, /reconnecting in 5 seconds/);
+  again.advance(6000);
+  await again.run("monitorStream()");
+  assert.equal(line.dataset.kind, "info");
+
+  // A message from the camera helper turns a plain status into a warning, an error stays an error.
+  const cam = cameraHarness();
+  await cam.run("startCamera()");
+  const id = cam.run("cameraProc.id");
+  cam.run(`handleCameraProcessEvent({ detail: ${JSON.stringify({ id, action: "stdOut", data: '{"event":"error","message":"No answer."}\n' })} })`);
+  await cam.run("refreshState()");
+  assert.equal(cam.elements.get("status").dataset.kind, "warn");
+  assert.match(cam.elements.get("status").textContent, /Camera: No answer\./);
+
+  // Nothing to say: no kind.
+  const quiet = harness();
+  quiet.run("setStatus('')");
+  assert.equal(quiet.elements.get("status").dataset.kind, "");
+});
+
+test("camera: the next click waits for a slow turn to end and the picture to catch up", async () => {
+  const h = cameraHarness();
+  await h.run("startCamera()");
+  await h.start(false);
+  const id = h.run("cameraProc.id");
+  const event = (data) => h.run(`handleCameraProcessEvent({ detail: ${JSON.stringify({ id, action: "stdOut", data })} })`);
+  h.run("handleVideoClick({ clientX: 490, clientY: 200 })");
+  assert.equal(cameraLines(h).length, 1);
+  // 19 degrees at 10 degrees per second: 400 ms to start + 1900 ms + 800 ms for the picture.
+  event('{"event":"turned","moved":true,"fromPan":-19,"fromTilt":-3,"toPan":0,"toTilt":-3,"zoom":9}\n');
+  h.advance(2500);
+  h.run("handleVideoClick({ clientX: 100, clientY: 100 })");
+  assert.equal(cameraLines(h).length, 1, "still turning");
+  h.advance(700);
+  h.run("handleVideoClick({ clientX: 100, clientY: 100 })");
+  assert.equal(cameraLines(h).length, 2, "the turn is over and the picture has caught up");
+});
+
+test("camera: choosing a scan result sets the camera address too and restarts the helper there", async () => {
+  const h = cameraHarness();
+  await h.run("startCamera()");
+  await h.run('applySelectedAddress("192.168.1.77:5000")');
+  assert.equal(h.run("parameters.camera_ip"), "192.168.1.77");
+  assert.match(h.files.get("/app/vlc_rec_params.json"), /"camera_ip": "192\.168\.1\.77"/, "saved with the settings");
+  assert.ok(h.stdin.includes("STOP\n"), "the old helper is asked to stop");
+  assert.equal(h.launches.length, 2);
+  assert.ok(h.launches[1].includes('"--ip" "192.168.1.77"'), h.launches[1]);
+  assert.match(h.run("withCameraNote('')"), /address set to 192\.168\.1\.77/);
+
+  // The same address again, or something that is not an address, leaves the helper alone.
+  await h.run('applySelectedAddress("192.168.1.77:5001")');
+  await h.run('applySelectedAddress("srt-encoder.local:5000")');
+  assert.equal(h.launches.length, 2);
+  assert.equal(h.run("parameters.camera_ip"), "192.168.1.77");
+});
+
+test("camera: a scan result switches the feature on when no camera address was set", async () => {
+  const h = harness();
+  h.files.set("/app/player/vlc-rec-camera-win_x64.exe", 1);
+  await h.run('applySelectedAddress("192.168.1.50:5000")');
+  assert.equal(h.launches.length, 1);
+  assert.ok(h.launches[0].includes('"--ip" "192.168.1.50"'));
+  assert.equal(h.elements.get("cameraBar").hidden, false);
+});
+
+test("the player gets a short network cache for the preview, any value from 0 is taken as it is and a negative value means VLC defaults", async () => {
+  const h = harness();
+  h.enablePlayer();
+  await h.start(false);
+  assert.ok(h.launches[0].includes('"--caching" "500"'), h.launches[0]);
+  await h.exit();
+  h.run("parameters.preview_caching_ms = 100"); // how low it can go depends on the network: not guessed
+  await h.start(false);
+  assert.ok(h.launches[1].includes('"--caching" "100"'), h.launches[1]);
+  await h.exit();
+  h.run("parameters.preview_caching_ms = 0");
+  await h.start(false);
+  assert.ok(h.launches[2].includes('"--caching" "0"'), h.launches[2]);
+  await h.exit();
+  h.run("parameters.preview_caching_ms = -1");
+  await h.start(false);
+  assert.ok(!h.launches[3].includes("--caching"), h.launches[3]);
+});
+
+test("external VLC also gets the short network cache", async () => {
+  const h = harness();
+  await h.start(false);
+  assert.ok(h.launches[0].includes('"--network-caching=500"'), h.launches[0]);
+});
+
+test("the preview buffer field shows the buffer of the settings and saves a new one within the limits", async () => {
+  const h = harness();
+  const field = h.elements.get("previewCaching");
+  await h.run("refreshState()");
+  assert.equal(field.value, "500", "the default");
+
+  field.value = "800";
+  field.change();
+  assert.equal(h.run("parameters.preview_caching_ms"), 800);
+  assert.match(h.files.get("/app/vlc_rec_params.json"), /"preview_caching_ms": 800/, "saved");
+
+  field.value = "60"; // a fast network can do with this: not raised
+  field.change();
+  assert.equal(h.run("parameters.preview_caching_ms"), 60);
+  assert.equal(field.value, "60");
+
+  field.value = "0";
+  field.change();
+  assert.equal(h.run("parameters.preview_caching_ms"), 0);
+
+  field.value = "-5"; // not a buffer
+  field.change();
+  assert.equal(h.run("parameters.preview_caching_ms"), 0);
+
+  field.value = "999999";
+  field.change();
+  assert.equal(h.run("parameters.preview_caching_ms"), 10000);
+
+  field.value = "";
+  field.change();
+  assert.equal(h.run("parameters.preview_caching_ms"), 500, "an empty field means the default");
+
+  // The next preview takes the value.
+  h.enablePlayer();
+  field.value = "900";
+  field.change();
+  await h.start(false);
+  assert.ok(h.launches[0].includes('"--caching" "900"'), h.launches[0]);
+});
+
+test("a running preview says that it still has the old buffer, and the button restarts it with the new one", async () => {
+  const h = harness();
+  h.enablePlayer();
+  const field = h.elements.get("previewCaching");
+  const pending = h.elements.get("bufferPending");
+  const apply = h.elements.get("bufferApplyBtn");
+  await h.start(false);
+  await h.run("refreshState()");
+  assert.equal(pending.hidden, true, "nothing to say while the field and the running player agree");
+  assert.equal(apply.hidden, true);
+
+  field.value = "300";
+  field.change();
+  assert.equal(pending.hidden, false, "said at once, not at the next refresh");
+  assert.equal(apply.hidden, false);
+  assert.match(h.elements.get("bufferPendingText").textContent, /Not in use yet.*running preview has 500 ms/);
+
+  apply.click();
+  for (let i = 0; i < 6; i += 1) await new Promise((resolve) => setImmediate(resolve));
+  await h.run("refreshState()");
+  assert.equal(h.launches.length, 2, "the preview was started again");
+  assert.ok(h.launches[1].includes('"--caching" "300"'), h.launches[1]);
+  assert.equal(h.run("mode"), "preview");
+  assert.equal(pending.hidden, true, "and now it is in use");
+
+  // Back to the old value while it runs: the note is back, with the value that is running.
+  field.value = "500";
+  field.change();
+  assert.match(h.elements.get("bufferPendingText").textContent, /has 300 ms/);
+
+  // The note goes with the process.
+  await h.exit();
+  await h.run("refreshState()");
+  assert.equal(pending.hidden, true);
+});
+
+test("a running recording keeps its buffer: the note says so and there is no restart button", async () => {
+  const h = harness();
+  h.enablePlayer();
+  const field = h.elements.get("previewCaching");
+  await h.start(true);
+  await h.run("refreshState()");
+  field.value = "200";
+  field.change();
+  assert.equal(h.elements.get("bufferPending").hidden, false);
+  assert.equal(h.elements.get("bufferApplyBtn").hidden, true, "a recording must not be cut");
+  assert.match(h.elements.get("bufferPendingText").textContent, /recording keeps 500 ms; the next start takes the new one/);
+  h.elements.get("bufferApplyBtn").click();
+  assert.equal(h.launches.length, 1);
+});
+
+test("camera: the web page button opens the camera's page in the browser, and shows only with a camera address", async () => {
+  const h = harness();
+  const page = h.elements.get("cameraPage");
+  await h.run("refreshState()");
+  assert.equal(page.hidden, true, "no address, no button");
+
+  h.run('parameters.camera_ip = "192.168.1.50"');
+  await h.run("refreshState()");
+  assert.equal(page.hidden, false);
+  assert.equal(h.elements.get("cameraAddressText").textContent, "192.168.1.50");
+
+  h.elements.get("cameraPageBtn").click();
+  await new Promise((resolve) => setImmediate(resolve));
+  assert.deepEqual(h.opened, ["http://192.168.1.50/"]);
+
+  // Not an address: nothing is opened, and nothing is built from it.
+  h.run('parameters.camera_ip = "192.168.1.50/../x"');
+  await h.run("refreshState()");
+  assert.equal(page.hidden, true);
+  h.elements.get("cameraPageBtn").click();
+  await new Promise((resolve) => setImmediate(resolve));
+  assert.equal(h.opened.length, 1);
+});
+
+test("camera: a browser that cannot be started is reported with the status", async () => {
+  const h = harness();
+  h.run('parameters.camera_ip = "192.168.1.50"');
+  h.os.openFails = true;
+  await h.run("openCameraPage()");
+  assert.match(h.run("withCameraNote('')"), /could not open http:\/\/192.168.1.50\/ in the browser/);
+});
+
+test("camera: a scan result shows the web page button too", async () => {
+  const h = harness();
+  h.files.set("/app/player/vlc-rec-camera-win_x64.exe", 1);
+  await h.run('applySelectedAddress("192.168.1.77:5000")');
+  assert.equal(h.elements.get("cameraPage").hidden, false);
+  assert.equal(h.elements.get("cameraAddressText").textContent, "192.168.1.77");
+});
+
+test("the preview buffer field shows VLC's 1000 for a setting of -1 and is left alone while it is edited", async () => {
+  const h = harness();
+  const field = h.elements.get("previewCaching");
+  h.run("parameters.preview_caching_ms = -1");
+  await h.run("refreshState()");
+  assert.equal(field.value, "1000");
+  h.run("document.activeElement = document.getElementById('previewCaching')");
+  field.value = "6";
+  await h.run("refreshState()");
+  assert.equal(field.value, "6", "what is being typed is not overwritten by the one second refresh");
+});
+
+test("camera: the waiting after a click follows the duration the helper reports", async () => {
+  const h = cameraHarness();
+  await h.run("startCamera()");
+  await h.start(false);
+  const id = h.run("cameraProc.id");
+  const event = (data) => h.run(`handleCameraProcessEvent({ detail: ${JSON.stringify({ id, action: "stdOut", data })} })`);
+  h.run("handleVideoClick({ clientX: 490, clientY: 200 })");
+  // 5 degrees at 10 degrees per second would be 500 ms; the helper says 3000.
+  event('{"event":"turned","moved":true,"fromPan":-19,"fromTilt":-3,"toPan":-24,"toTilt":-3,"zoom":9,"durationMs":3000}\n');
+  h.advance(3500);
+  h.run("handleVideoClick({ clientX: 100, clientY: 100 })");
+  assert.equal(cameraLines(h).length, 1, "400 + 3000 + 800 ms are not over yet");
+  h.advance(1000);
+  h.run("handleVideoClick({ clientX: 100, clientY: 100 })");
+  assert.equal(cameraLines(h).length, 2);
 });

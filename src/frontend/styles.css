@@ -2,11 +2,15 @@
   --bg: #2c3e50;
   --panel: #34495e;
   --text: #ecf0f1;
+  --muted: #a9bac9;
   --blue: #3498db;
   --green: #27ae60;
   --mid: #64748b;
   --danger: #e74c3c;
+  --warn: #f0b84a;
   --stage: #0e151c;
+  --line: rgba(255, 255, 255, 0.13);
+  --well: rgba(0, 0, 0, 0.17);
 }
 
 * {
@@ -37,19 +41,6 @@ body {
 
 .layout.is-stack {
   flex-direction: column;
-}
-
-.panel {
-  flex: 0 0 auto;
-  min-width: 0;
-  min-height: 0;
-  overflow: auto;
-  padding: 16px;
-}
-
-/* app.js widens the side panel up to SIDE_PANEL_MAX_WIDTH when the video leaves room. */
-.layout.is-side .panel {
-  width: 384px;
 }
 
 .stage {
@@ -87,174 +78,457 @@ body {
   display: none;
 }
 
-/* macOS and ARM Linux: VLC opens its own window, so the panel is all there is. */
-.layout.no-video .panel {
-  flex: 1 1 auto;
-  width: auto;
-  max-width: 640px;
-  margin: 0 auto;
+.video-placeholder {
+  padding: 8px;
+  text-align: center;
 }
 
-/* Below the video: the fields side by side, the controls in one row. */
-.layout.is-stack .panel {
-  display: grid;
-  grid-template-columns: repeat(3, minmax(0, 1fr));
-  grid-template-areas:
-    "ip folder file"
-    "options info buttons"
-    "status status status";
-  column-gap: 16px;
-  align-items: center;
-  align-content: start;
-  padding: 4px 16px 10px;
-}
-
-@media (max-width: 1039px) {
-  .layout.is-stack .panel {
-    grid-template-columns: repeat(2, minmax(0, 1fr));
-    grid-template-areas:
-      "ip folder"
-      "file options"
-      "info buttons"
-      "status status";
-  }
-}
-
-@media (max-width: 719px) {
-  .layout.is-stack .panel {
-    grid-template-columns: minmax(0, 1fr);
-    grid-template-areas: "ip" "folder" "file" "options" "info" "buttons" "status";
-  }
-}
-
-.field-ip { grid-area: ip; }
-.field-folder { grid-area: folder; }
-.field-file { grid-area: file; }
-.reconnect-option { grid-area: options; }
-.info-row { grid-area: info; }
-.button-row { grid-area: buttons; }
-.status { grid-area: status; }
-
-.layout.is-stack .field {
-  align-self: end;
-}
-
-/* One line, so that a long message cannot change the height of the video. */
-.layout.is-stack .status {
-  white-space: nowrap;
-  overflow: hidden;
-  text-overflow: ellipsis;
-  margin-top: 8px;
-}
-
-/* ---- compact: only the essentials, the rest of the window is video ---- */
-.layout.is-compact .field,
-.layout.is-compact .reconnect-option,
-.layout.is-compact .info-label {
-  display: none;
-}
-
-.layout.is-compact .info-row,
-.layout.is-compact .button-row,
-.layout.is-compact .status {
-  margin: 0;
-}
-
-.layout.is-compact .btn {
-  padding: 8px 12px;
-}
-
-.layout.is-compact .info-row {
-  gap: 12px;
-  font-variant-numeric: tabular-nums;
-}
-
-.layout.is-compact .mode-badge {
-  order: -2;
-}
-
-/* Only a recording has a file size worth the room. */
-.layout.is-compact:not([data-mode="recording"]) .info-size {
-  display: none;
-}
-
-.layout.is-compact .info-time {
-  order: -1;
-}
-
-/* A bar below the video. */
-.layout.is-stack.is-compact .panel {
-  grid-template-columns: auto minmax(0, 1fr) auto;
-  grid-template-areas: "info status buttons";
-  column-gap: 14px;
-  padding: 6px 10px;
-}
-
-.layout.is-stack.is-compact .button-row .btn:not(.btn-toggle) {
+/* ---- the panel: the bar, which is always there, and the drawer, which the settings button folds away ----
+   Beside the video: [bar | drawer]. Below the video: the drawer above the bar. */
+.panel {
   flex: 0 0 auto;
-  min-width: 96px;
+  min-width: 0;
+  min-height: 0;
+  overflow: auto;
+  display: flex;
 }
 
-/* A strip beside the video. */
+.layout.is-stack .panel {
+  flex-direction: column;
+}
+
+/* app.js widens a side panel up to SIDE_PANEL_MAX_WIDTH when the video leaves room. */
+.layout.is-side .panel {
+  flex-direction: row;
+  align-items: flex-start;
+  width: 480px;
+}
+
 .layout.is-side.is-compact .panel {
   width: 172px;
+}
+
+/* ---- the bar: time, status, camera, buttons ---- */
+.bar {
+  min-width: 0;
+}
+
+.info-row { grid-area: info; }
+.status { grid-area: status; }
+.camera-bar { grid-area: camera; }
+.button-row { grid-area: buttons; }
+
+/* A strip beside the video; it stays in view while a tall drawer scrolls. */
+.layout.is-side .bar {
+  flex: 0 0 172px;
+  width: 172px;
+  position: sticky;
+  top: 0;
   display: flex;
   flex-direction: column;
   gap: 12px;
   padding: 12px 10px;
 }
 
-.layout.is-side.is-compact .info-row {
+/* A bar below the video. The columns beside the status take all the room their content wants, so that
+   nothing is cut off; the status gives way. */
+.layout.is-stack .bar {
+  display: grid;
+  grid-template-columns: max-content minmax(0, 1fr) max-content;
+  grid-template-areas: "info status buttons";
+  gap: 8px 14px;
+  align-items: center;
+  padding: 6px 10px;
+}
+
+.layout.is-stack[data-camera="on"] .bar {
+  grid-template-columns: max-content minmax(0, 1fr) max-content max-content;
+  grid-template-areas: "info status camera buttons";
+}
+
+@media (max-width: 899px) {
+  .layout.is-stack[data-camera="on"] .bar {
+    grid-template-columns: max-content minmax(0, 1fr) max-content;
+    grid-template-areas:
+      "info status buttons"
+      "camera camera camera";
+  }
+}
+
+/* Narrow: the status gets a row of its own, and what is left of the first row is for the time, which wraps. */
+@media (max-width: 719px) {
+  .layout.is-stack .bar {
+    grid-template-columns: minmax(0, 1fr) max-content;
+    grid-template-areas:
+      "info buttons"
+      "status status";
+  }
+
+  .layout.is-stack[data-camera="on"] .bar {
+    grid-template-columns: minmax(0, 1fr) max-content;
+    grid-template-areas:
+      "info buttons"
+      "camera camera"
+      "status status";
+  }
+
+  .layout.is-stack .button-row .btn:not(.btn-toggle) {
+    min-width: 136px;
+  }
+}
+
+.info-row {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 6px 12px;
+  font-size: 14px;
+  font-variant-numeric: tabular-nums;
+}
+
+.layout.is-side .info-row {
   flex-direction: column;
   align-items: flex-start;
   gap: 6px;
 }
 
-.layout.is-side.is-compact .button-row {
+.info-item {
+  white-space: nowrap;
+}
+
+.mode-badge {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  padding: 2px 8px;
+  border-radius: 999px;
+  font-size: 11px;
+  font-weight: 700;
+  letter-spacing: 0.06em;
+  white-space: nowrap;
+  order: -2;
+}
+
+.mode-badge::before {
+  content: "";
+  width: 8px;
+  height: 8px;
+  border-radius: 50%;
+  background: currentColor;
+}
+
+.mode-badge[hidden] {
+  display: none;
+}
+
+.mode-badge.is-recording {
+  color: #ff7b6e;
+  background: rgba(231, 76, 60, 0.18);
+}
+
+.mode-badge.is-recording::before {
+  animation: rec-blink 1.4s ease-in-out infinite;
+}
+
+.mode-badge.is-preview {
+  color: #4cd38a;
+  background: rgba(39, 174, 96, 0.18);
+}
+
+@keyframes rec-blink {
+  50% { opacity: 0.25; }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .mode-badge.is-recording::before {
+    animation: none;
+  }
+}
+
+.info-time {
+  order: -1;
+}
+
+/* Only a recording has a file size worth the room. */
+.layout:not([data-mode="recording"]) .info-size {
+  display: none;
+}
+
+/* The status line: plain text, with a coloured edge for a warning or an error. */
+.status {
+  min-height: 0;
+  padding: 4px 8px;
+  border-left: 3px solid #5f7b94;
+  border-radius: 4px;
+  background: var(--well);
+  color: #d8e0e8;
+  font-size: 12px;
+  line-height: 1.35;
+  overflow-wrap: anywhere;
+}
+
+/* It keeps its place when there is nothing to say, so that the bar does not jump. */
+.status:empty {
+  visibility: hidden;
+}
+
+.status[data-kind="warn"] {
+  border-left-color: var(--warn);
+  color: #f7e0ae;
+}
+
+.status[data-kind="error"] {
+  border-left-color: var(--danger);
+  color: #ffbcb5;
+}
+
+/* One line below the video, so that a long message cannot change the height of the video. */
+.layout.is-stack .status {
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+/* ---- buttons ---- */
+.button-row {
+  display: flex;
+  gap: 10px;
+}
+
+.layout.is-side .button-row {
   flex-direction: column;
   gap: 8px;
 }
 
-.layout.is-side.is-compact .button-row .btn {
+.btn {
+  border: none;
+  border-radius: 8px;
+  color: #fff;
+  padding: 8px 12px;
+  font-weight: 600;
+  cursor: pointer;
+}
+
+.btn:focus-visible {
+  outline: 2px solid #8cc8f0;
+  outline-offset: 2px;
+}
+
+.button-row .btn,
+.scan-actions .btn {
+  flex: 1;
+}
+
+.button-row .btn {
+  white-space: nowrap;
+}
+
+/* As wide as the longest label ("Stop Recording"), so that a new label does not move anything. */
+.layout.is-stack .button-row .btn:not(.btn-toggle) {
+  flex: 0 0 auto;
+  min-width: 150px;
+}
+
+.layout.is-side .button-row .btn {
   flex: 0 0 auto;
 }
 
-.layout.is-side.is-compact .button-row .btn-toggle {
+/* A width of its own, not only a flex basis: the width of the column that holds the row is worked
+   out from the icon otherwise. */
+.button-row .btn-toggle {
+  flex: 0 0 auto;
+  width: 40px;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  padding: 0;
+  background: #3b5168;
+  color: #d5dee6;
+}
+
+.layout.is-side .button-row .btn-toggle {
   width: auto;
   height: 34px;
 }
 
-.layout.is-side.is-compact .status {
+.button-row .btn-toggle:hover {
+  background: #46607a;
+}
+
+/* Pressed in while the drawer is open. */
+.button-row .btn-toggle[aria-expanded="true"] {
+  background: #4f6d8a;
+  color: #fff;
+  box-shadow: inset 0 0 0 1px rgba(255, 255, 255, 0.28);
+}
+
+.row .btn {
+  flex: 0 0 auto;
+  padding-inline: 16px;
+}
+
+.btn-inline {
+  flex: 0 0 auto;
+  padding-inline: 16px;
+}
+
+.btn-small {
+  padding: 4px 10px;
   font-size: 12px;
-  min-height: 0;
 }
 
-/* app.js adds short-labels when a full label would not fit on one line. */
-.btn-label-full,
-.btn-label-short {
-  white-space: nowrap;
+.btn:disabled {
+  opacity: 0.5;
+  cursor: not-allowed;
 }
 
-.btn-label-short,
-.layout.is-compact .btn-label-full,
-.panel.short-labels .btn-label-full {
+.btn-blue {
+  background: var(--blue);
+}
+
+.btn-green {
+  background: var(--green);
+}
+
+.btn-red {
+  background: var(--danger);
+}
+
+/* ---- the camera: zoom buttons and the turning speed, shown when a camera is set up ---- */
+.camera-bar {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 8px;
+}
+
+.camera-bar[hidden] {
   display: none;
 }
 
-.layout.is-compact .btn-label-short,
-.panel.short-labels .btn-label-short {
-  display: inline;
+.camera-item {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  min-width: 0;
 }
 
-.video-placeholder {
-  padding: 8px;
-  text-align: center;
+.camera-item-speed {
+  flex: 1 1 110px;
+  gap: 8px;
+}
+
+.camera-item-speed input[type="range"] {
+  flex: 1 1 60px;
+  min-width: 50px;
+  height: 24px;
+  margin: 0;
+  accent-color: var(--blue);
+  cursor: pointer;
+}
+
+.camera-item-speed output {
+  flex: 0 0 auto;
+  min-width: 52px;
+  text-align: right;
+  font-size: 13px;
+  font-variant-numeric: tabular-nums;
+}
+
+.camera-bar .btn.btn-zoom {
+  flex: 0 0 auto;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 38px;
+  height: 30px;
+  padding: 0;
+  background: #3b5168;
+  color: #e6edf3;
+  font-size: 20px;
+  line-height: 1;
+}
+
+.camera-bar .btn.btn-zoom:hover {
+  background: #46607a;
+}
+
+/* Below the video the row is one line: the slider has a width of its own, because the grid gives an
+   auto column only its minimum width while the status column takes the rest. */
+.layout.is-stack .camera-bar {
+  flex-wrap: nowrap;
+}
+
+.layout.is-stack .camera-item-speed {
+  flex: 0 0 auto;
+}
+
+.layout.is-stack .camera-item-speed input[type="range"] {
+  flex: 0 0 130px;
+  width: 130px;
+}
+
+/* ---- the drawer: everything that is not needed while watching ---- */
+.drawer {
+  display: grid;
+  gap: 12px 16px;
+  align-items: start;
+  min-width: 0;
+  padding: 12px 14px;
+  border: 1px solid var(--line);
+  border-radius: 10px;
+  background: rgba(255, 255, 255, 0.045);
+}
+
+.layout.is-compact .drawer {
+  display: none;
+}
+
+/* Beside the bar, filling the width the panel has. */
+.layout.is-side .drawer {
+  flex: 1 1 auto;
+  grid-template-columns: minmax(0, 1fr);
+  margin: 12px 12px 12px 0;
+}
+
+/* Above the bar: the fields in columns. */
+.layout.is-stack .drawer {
+  grid-template-columns: repeat(3, minmax(0, 1fr));
+  margin: 8px 10px 0;
+}
+
+.layout.is-stack .drawer-preview {
+  grid-column: span 2;
+}
+
+@media (max-width: 1039px) {
+  .layout.is-stack .drawer {
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+  }
+
+  .layout.is-stack .drawer-preview {
+    grid-column: span 1;
+  }
+
+  .layout.is-stack .drawer-camera {
+    grid-column: 1 / -1;
+  }
+}
+
+@media (max-width: 719px) {
+  .layout.is-stack .drawer {
+    grid-template-columns: minmax(0, 1fr);
+  }
+}
+
+.drawer-item {
+  min-width: 0;
 }
 
 .field-label {
   display: block;
   font-size: 13px;
-  margin: 10px 0 6px;
+  margin: 0 0 6px;
 }
 
 .row {
@@ -307,12 +581,28 @@ body {
   outline-offset: 0;
 }
 
-.reconnect-option {
+.row .btn {
+  white-space: nowrap;
+}
+
+/* The two options share a line where there is room. */
+.options-group {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 8px 24px;
+  font-size: 13px;
+}
+
+.reconnect-option,
+.buffer-option {
   display: flex;
   align-items: center;
   gap: 8px;
-  margin-top: 12px;
   font-size: 13px;
+}
+
+.reconnect-option {
   cursor: pointer;
 }
 
@@ -321,151 +611,97 @@ body {
   accent-color: var(--blue);
 }
 
-.info-row {
-  margin-top: 12px;
+.buffer-option .buffer-input {
+  width: 84px;
+  padding: 4px 6px;
+  font-size: 13px;
+}
+
+.drawer-hint {
+  margin: 8px 0 0;
+  font-size: 12px;
+  line-height: 1.45;
+  color: var(--muted);
+}
+
+/* A running preview or recording that was started with another buffer than the field says. */
+.buffer-pending {
   display: flex;
   flex-wrap: wrap;
   align-items: center;
-  gap: 6px 20px;
-  font-size: 14px;
+  gap: 6px 12px;
+  margin-top: 8px;
+  padding: 6px 10px;
+  border-left: 3px solid var(--warn);
+  border-radius: 4px;
+  background: rgba(240, 184, 74, 0.12);
+  color: #f7e0ae;
+  font-size: 12.5px;
+  line-height: 1.4;
 }
 
-.info-item {
-  white-space: nowrap;
-}
-
-.mode-badge {
-  display: inline-flex;
-  align-items: center;
-  gap: 6px;
-  padding: 2px 8px;
-  border-radius: 999px;
-  font-size: 11px;
-  font-weight: 700;
-  letter-spacing: 0.06em;
-  white-space: nowrap;
-}
-
-.mode-badge::before {
-  content: "";
-  width: 8px;
-  height: 8px;
-  border-radius: 50%;
-  background: currentColor;
-}
-
-/* The full panel has the Stop button's label; the badge is for the compact controls. */
-.mode-badge[hidden],
-.layout:not(.is-compact) .mode-badge {
+.buffer-pending[hidden],
+.btn[hidden] {
   display: none;
 }
 
-.mode-badge.is-recording {
-  color: #ff7b6e;
-  background: rgba(231, 76, 60, 0.18);
-}
-
-.mode-badge.is-recording::before {
-  animation: rec-blink 1.4s ease-in-out infinite;
-}
-
-.mode-badge.is-preview {
-  color: #4cd38a;
-  background: rgba(39, 174, 96, 0.18);
-}
-
-@keyframes rec-blink {
-  50% { opacity: 0.25; }
-}
-
-@media (prefers-reduced-motion: reduce) {
-  .mode-badge.is-recording::before {
-    animation: none;
-  }
-}
-
-.button-row {
-  margin-top: 18px;
-  display: flex;
-  gap: 10px;
-}
-
-.layout.is-stack:not(.is-compact) .info-row,
-.layout.is-stack:not(.is-compact) .button-row,
-.layout.is-stack:not(.is-compact) .reconnect-option {
-  margin-top: 10px;
-}
-
-.btn {
-  border: none;
-  border-radius: 8px;
-  color: #fff;
-  padding: 10px;
-  font-weight: 600;
-  cursor: pointer;
-}
-
-.btn:focus-visible {
-  outline: 2px solid #8cc8f0;
-  outline-offset: 2px;
-}
-
-.button-row .btn,
-.scan-actions .btn {
-  flex: 1;
-}
-
-/* Buttons share the row equally; a label that does not fit shows as overflow,
-   which app.js detects. */
-.button-row .btn {
-  min-width: 0;
-  overflow: hidden;
-}
-
-.button-row .btn-toggle {
-  flex: 0 0 40px;
-  display: inline-flex;
+.camera-page-row {
   align-items: center;
-  justify-content: center;
-  padding: 0;
-  background: #3b5168;
-  color: #d5dee6;
 }
 
-.button-row .btn-toggle:hover {
-  background: #46607a;
+.camera-address {
+  flex: 1;
+  min-width: 0;
+  font-size: 14px;
+  font-variant-numeric: tabular-nums;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
 }
 
-.button-row .btn-toggle[aria-expanded="true"] {
-  background: #4f6d8a;
-  color: #fff;
+/* ---- no embedded player (macOS, ARM Linux): VLC opens its own window, so the panel is all there is ---- */
+.layout.no-video .panel {
+  flex: 1 1 auto;
+  flex-direction: column;
+  align-items: stretch;
+  width: auto;
+  max-width: 640px;
+  margin: 0 auto;
 }
 
-.row .btn {
+.layout.no-video .bar {
+  position: static;
+  width: auto;
   flex: 0 0 auto;
-  padding-inline: 16px;
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) max-content;
+  grid-template-areas:
+    "info buttons"
+    "status status";
 }
 
-.btn-inline {
-  flex: 0 0 auto;
-  padding-inline: 16px;
+.layout.no-video[data-camera="on"] .bar {
+  grid-template-areas:
+    "info buttons"
+    "camera camera"
+    "status status";
 }
 
-.btn:disabled {
-  opacity: 0.5;
-  cursor: not-allowed;
+.layout.no-video .button-row .btn:not(.btn-toggle) {
+  min-width: 136px;
 }
 
-.btn-blue {
-  background: var(--blue);
+.layout.no-video .info-row,
+.layout.no-video .button-row {
+  flex-direction: row;
 }
 
-.btn-green {
-  background: var(--green);
+.layout.no-video .drawer {
+  margin: 12px 12px 0;
 }
 
-.btn-red {
-  background: var(--danger);
+.layout.no-video .status {
+  white-space: normal;
 }
 
 .scan-dialog {
@@ -635,12 +871,4 @@ body {
 
 .scan-results option.scan-state-unknown {
   color: #bdc3c7;
-}
-
-.status {
-  color: var(--danger);
-  font-style: italic;
-  margin-top: 12px;
-  min-height: 20px;
-  overflow-wrap: anywhere;
 }

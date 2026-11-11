@@ -10,59 +10,107 @@
 <body>
   <!-- app.js picks the layout classes: is-side or is-stack, plus is-compact. -->
   <div id="layout" class="layout is-side">
+    <!-- The panel is the bar, which is always there, and the drawer with everything else, which
+         the settings button folds away (is-compact). Beside the video the drawer opens to the right of
+         the bar, below the video above it. -->
     <main id="panel" class="panel">
-      <div class="field field-ip">
-        <label class="field-label" for="ip">SRT Stream IP Address (e.g., 192.168.1.100:5000):</label>
-        <div class="row">
-          <input id="ip" class="text-input" type="text" />
-          <button id="scanBtn" class="btn btn-blue btn-inline" type="button">Scan</button>
+      <section id="drawer" class="drawer" aria-label="Settings">
+        <div class="drawer-item field-ip">
+          <label class="field-label" for="ip">SRT Stream IP Address (e.g., 192.168.1.100:5000):</label>
+          <div class="row">
+            <input id="ip" class="text-input" type="text" />
+            <button id="scanBtn" class="btn btn-blue btn-inline" type="button">Scan</button>
+          </div>
+        </div>
+
+        <div class="drawer-item field-folder">
+          <label class="field-label" for="outPath">Output Folder:</label>
+          <div class="row">
+            <input id="outPath" class="text-input" type="text" />
+            <button id="browseBtn" class="btn btn-blue" type="button">Browse...</button>
+          </div>
+        </div>
+
+        <div class="drawer-item field-file">
+          <label class="field-label" for="filename">Output Filename (e.g., 2024-07-05):</label>
+          <div class="row">
+            <input id="filename" class="text-input" type="text" />
+            <select id="extension" class="select-input" aria-label="Output file extension">
+              <option value="mkv">mkv</option>
+              <option value="mp4">mp4</option>
+            </select>
+          </div>
+        </div>
+
+        <div class="drawer-item drawer-preview">
+          <div class="options-group">
+            <label class="reconnect-option" title="Restart VLC when recording stops growing or preview stops receiving data.">
+              <input id="autoReconnect" type="checkbox" />
+              Automatically reconnect if the stream stalls
+            </label>
+            <label class="buffer-option">
+              Preview buffer
+              <input id="previewCaching" class="text-input buffer-input" type="number" min="10" max="10000" step="10" aria-label="Preview buffer in milliseconds" aria-describedby="bufferHint" />
+              ms
+            </label>
+          </div>
+          <p id="bufferHint" class="drawer-hint">
+            Applies when the preview starts, not to one that is running. Less buffer means less delay, but too little
+            freezes the picture. How little works depends on the network and this computer: lower it until the picture
+            stutters, then raise it a little.
+          </p>
+          <!-- Shown while the running preview or recording was started with another buffer than the field says. -->
+          <div id="bufferPending" class="buffer-pending" role="status" hidden>
+            <span id="bufferPendingText"></span>
+            <button id="bufferApplyBtn" class="btn btn-small btn-blue" type="button" hidden>Restart preview</button>
+          </div>
+        </div>
+
+        <!-- Shown when camera_ip is a valid address (a scan result sets it too). -->
+        <div id="cameraPage" class="drawer-item drawer-camera" hidden>
+          <span class="field-label">Camera</span>
+          <div class="row camera-page-row">
+            <span id="cameraAddressText" class="camera-address"></span>
+            <button id="cameraPageBtn" class="btn btn-blue btn-inline" type="button" title="Opens the camera's own control page in the web browser: there, for example, the SD card can be formatted.">Open web page</button>
+          </div>
+          <p class="drawer-hint">Click the picture to centre it. Mouse wheel: zoom. Arrow keys: turn (Shift: larger steps).</p>
+        </div>
+      </section>
+
+      <div class="bar">
+        <div class="info-row">
+          <span id="modeBadge" class="mode-badge" hidden></span>
+          <span class="info-item info-time" title="Time elapsed"><span id="elapsed">00:00:00</span></span>
+          <span class="info-item info-size" title="File size"><span id="fileSize">0 B</span></span>
+        </div>
+
+        <div id="status" class="status" role="status"></div>
+
+        <!-- Shown only when camera_ip is set and the camera helper is present. -->
+        <div id="cameraBar" class="camera-bar" role="group" aria-label="Camera" hidden>
+          <div class="camera-item">
+            <button id="zoomOutBtn" class="btn btn-zoom" type="button" title="Camera zoom out (mouse wheel down)" aria-label="Camera zoom out">&minus;</button>
+            <button id="zoomInBtn" class="btn btn-zoom" type="button" title="Camera zoom in (mouse wheel up)" aria-label="Camera zoom in">+</button>
+          </div>
+          <div class="camera-item camera-item-speed" title="How fast the camera turns after a click on the picture, in degrees per second">
+            <input id="cameraSpeed" type="range" min="1" max="90" step="1" value="10" aria-label="Camera turning speed in degrees per second" />
+            <output id="cameraSpeedValue" for="cameraSpeed">10 °/s</output>
+          </div>
+        </div>
+
+        <div class="button-row">
+          <button id="recordBtn" class="btn btn-blue" type="button">Record</button>
+          <button id="previewBtn" class="btn btn-green" type="button">Preview</button>
+          <button id="panelToggle" class="btn btn-toggle" type="button" aria-expanded="true" aria-controls="drawer" title="Hide settings" aria-label="Hide settings">
+            <svg viewBox="0 0 20 20" width="18" height="18" aria-hidden="true" focusable="false">
+              <path d="M3 5h14M3 10h14M3 15h14" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" fill="none" />
+              <circle cx="7" cy="5" r="2.3" fill="currentColor" />
+              <circle cx="13" cy="10" r="2.3" fill="currentColor" />
+              <circle cx="8" cy="15" r="2.3" fill="currentColor" />
+            </svg>
+          </button>
         </div>
       </div>
-
-      <div class="field field-folder">
-        <label class="field-label" for="outPath">Output Folder:</label>
-        <div class="row">
-          <input id="outPath" class="text-input" type="text" />
-          <button id="browseBtn" class="btn btn-blue" type="button">Browse...</button>
-        </div>
-      </div>
-
-      <div class="field field-file">
-        <label class="field-label" for="filename">Output Filename (e.g., 2024-07-05):</label>
-        <div class="row">
-          <input id="filename" class="text-input" type="text" />
-          <select id="extension" class="select-input" aria-label="Output file extension">
-            <option value="mkv">mkv</option>
-            <option value="mp4">mp4</option>
-          </select>
-        </div>
-      </div>
-
-      <label class="reconnect-option" title="Restart VLC when recording stops growing or preview stops receiving data.">
-        <input id="autoReconnect" type="checkbox" />
-        Automatically reconnect if the stream stalls
-      </label>
-
-      <div class="info-row">
-        <span id="modeBadge" class="mode-badge" hidden></span>
-        <span class="info-item info-size"><span class="info-label">File Size:</span> <span id="fileSize">0 B</span></span>
-        <span class="info-item info-time"><span class="info-label">Time Elapsed:</span> <span id="elapsed">00:00:00</span></span>
-      </div>
-
-      <div class="button-row">
-        <button id="recordBtn" class="btn btn-blue" type="button">Start Recording</button>
-        <button id="previewBtn" class="btn btn-green" type="button">Preview Only</button>
-        <button id="panelToggle" class="btn btn-toggle" type="button" aria-expanded="true" title="Hide settings" aria-label="Hide settings">
-          <svg viewBox="0 0 20 20" width="18" height="18" aria-hidden="true" focusable="false">
-            <path d="M3 5h14M3 10h14M3 15h14" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" fill="none" />
-            <circle cx="7" cy="5" r="2.3" fill="currentColor" />
-            <circle cx="13" cy="10" r="2.3" fill="currentColor" />
-            <circle cx="8" cy="15" r="2.3" fill="currentColor" />
-          </svg>
-        </button>
-      </div>
-
-      <div id="status" class="status"></div>
     </main>
 
     <!-- The native video window of vlc-rec-player is placed exactly over videoHost. -->
