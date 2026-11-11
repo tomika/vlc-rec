@@ -11,6 +11,9 @@
  *   --rect X,Y,W,H   video area in physical pixels, relative to the client area
  *   --record-hex H   output file; preview only when omitted
  *   --mux mkv|mp4    output container, default mkv
+ *   --caching MS     VLC's network and live caching in ms, 0..60000; VLC's own default is 1000,
+ *                    which delays the picture by about that much. Lower it for a picture that
+ *                    steers something; too low makes a jittery link stutter
  *
  * stdin, one command per line: RECT X,Y,W,H | HIDE | SHOW | STOP
  * Commands are case-insensitive and unknown lines are ignored, so "stop" works.
@@ -18,17 +21,24 @@
  *
  * stdout, one JSON object per line:
  *   {"event":"started","libvlc":"3.0.24"}
- *   {"event":"stats","state":3,"readBytes":123}
+ *   {"event":"stats","state":3,"readBytes":123,"decoded":40,"displayed":38,"lost":2}
  *   {"event":"video","width":1920,"height":1080,"sarNum":1,"sarDen":1}
+ *   {"event":"log","level":"warning","module":"direct3d11","text":"..."}
+ *   {"event":"window","text":"..."}      (Windows only, once, 3 s after the start)
  *   {"event":"error","code":"...","message":"..."}
  *   {"event":"stopped"}
  *
  * readBytes is a 32-bit libVLC counter and can wrap: compare it for equality only.
+ * decoded, displayed and lost count pictures: data that arrives but is not decoded points at the
+ * stream, decoded but not displayed at the video output. "log" carries libVLC's own messages
+ * (warnings and errors; at most 300 per process); "window" describes the child windows that exist.
  * "video" is sent when the size of the first video track becomes known or changes.
  * Width and height are already swapped for rotated video; the display aspect ratio
  * is width * sarNum / (height * sarDen).
  *
  * Environment: VLC_REC_LIBVLC_DIR selects the only folder libVLC is loaded from.
+ *   VLC_REC_VLC_ARGS adds libVLC options, separated by spaces, for trying things out,
+ *   for example "--verbose=2" or "--vout=direct3d9 --avcodec-hw=none".
  */
 #include <stdarg.h>
 #include <stdio.h>
@@ -123,6 +133,9 @@ static struct {
     int (*player_get_state)(libvlc_media_player_t *);
     void (*video_set_mouse_input)(libvlc_media_player_t *, unsigned);
     void (*video_set_key_input)(libvlc_media_player_t *, unsigned);
+    /* Optional: a libVLC without them (the test stub) just runs without log events. */
+    void (*log_set)(libvlc_instance_t *, void (*)(void *, int, const void *, const char *, va_list), void *);
+    void (*log_get_context)(const void *, const char **, const char **, unsigned *);
 #ifdef _WIN32
     void (*player_set_hwnd)(libvlc_media_player_t *, void *);
 #else
@@ -136,6 +149,7 @@ static long g_parent_pid = 0;
 static char *g_url = NULL;
 static char *g_record = NULL;
 static const char *g_mux = "mkv";
+static int g_caching = -1; /* ms; -1 leaves VLC's default */
 static int g_rect[4] = {0, 0, 640, 360};
 
 #ifdef _WIN32
@@ -173,27 +187,82 @@ static void emit_raw(const char *line)
     OUT_UNLOCK();
 }
 
+/* Text for inside a JSON string: quotes and backslashes escaped, control characters become spaces. */
+static void json_escape(char *dst, size_t cap, const char *src)
+{
+    size_t o = 0;
+    for (const char *p = src; *p && o + 3 < cap; p++) {
+        unsigned char c = (unsigned char)*p;
+        if (c == '"' || c == '\\') {
+            dst[o++] = '\\';
+            dst[o++] = (char)c;
+        } else if (c >= 0x20) {
+            dst[o++] = (char)c;
+        } else {
+            dst[o++] = ' ';
+        }
+    }
+    dst[o] = 0;
+}
+
 static void emit_error(const char *code, const char *fmt, ...)
 {
     char message[512], escaped[1100], line[1300];
-    size_t o = 0;
     va_list ap;
     va_start(ap, fmt);
     vsnprintf(message, sizeof message, fmt, ap);
     va_end(ap);
-    for (const char *p = message; *p && o + 3 < sizeof escaped; p++) {
-        unsigned char c = (unsigned char)*p;
-        if (c == '"' || c == '\\') {
-            escaped[o++] = '\\';
-            escaped[o++] = (char)c;
-        } else if (c >= 0x20) {
-            escaped[o++] = (char)c;
-        } else {
-            escaped[o++] = ' ';
-        }
-    }
-    escaped[o] = 0;
+    json_escape(escaped, sizeof escaped, message);
     snprintf(line, sizeof line, "{\"event\":\"error\",\"code\":\"%s\",\"message\":\"%s\"}", code, escaped);
+    emit_raw(line);
+}
+
+/* libVLC's own messages, so that a black picture or a failing stream says why. libVLC calls this
+ * from any of its threads. */
+enum { MAX_LOG_LINES = 300 };
+static volatile long g_log_lines = 0;
+/* A log callback gets every message whatever --verbose says, so it filters itself:
+ * warnings and errors, unless VLC_REC_VLC_ARGS has --verbose=1 (notices too) or 2 (everything). */
+static int g_log_min_level = 3;
+/* Hashes of the messages already sent: an audio device that fails repeats its warning for every
+ * buffer, and that would use up the lines before the video output says anything. No locking:
+ * a race costs a repeated line at worst, and the index is bounded. */
+enum { MAX_SEEN = 256 };
+static unsigned g_seen[MAX_SEEN];
+static volatile int g_seen_count = 0;
+
+static void log_callback(void *data, int level, const void *ctx, const char *fmt, va_list args)
+{
+    (void)data;
+    if (level < g_log_min_level || g_log_lines > MAX_LOG_LINES) return;
+    char text[600], text_escaped[1300], module_escaped[100], line[1500];
+    const char *module = NULL;
+    vsnprintf(text, sizeof text, fmt, args);
+    size_t len = strlen(text);
+    while (len > 0 && (text[len - 1] == '\n' || text[len - 1] == '\r')) text[--len] = 0;
+    if (ctx && vlc.log_get_context) vlc.log_get_context(ctx, &module, NULL, NULL);
+
+    unsigned hash = 2166136261u;
+    for (const char *p = module ? module : ""; *p; p++) hash = (hash ^ (unsigned char)*p) * 16777619u;
+    for (const char *p = text; *p; p++) hash = (hash ^ (unsigned char)*p) * 16777619u;
+    int known = g_seen_count < MAX_SEEN ? g_seen_count : MAX_SEEN;
+    for (int i = 0; i < known; i++) {
+        if (g_seen[i] == hash) return;
+    }
+    if (g_seen_count < MAX_SEEN) g_seen[g_seen_count++] = hash;
+
+    long n = ++g_log_lines;
+    if (n > MAX_LOG_LINES) return;
+    if (n == MAX_LOG_LINES) {
+        snprintf(text, sizeof text, "libVLC messages are not shown any more.");
+        module = NULL;
+    }
+    json_escape(text_escaped, sizeof text_escaped, text);
+    json_escape(module_escaped, sizeof module_escaped, module ? module : "");
+    /* LIBVLC_DEBUG 0, LIBVLC_NOTICE 2, LIBVLC_WARNING 3, LIBVLC_ERROR 4 */
+    const char *name = level >= 4 ? "error" : level == 3 ? "warning" : level == 2 ? "notice" : "debug";
+    snprintf(line, sizeof line, "{\"event\":\"log\",\"level\":\"%s\",\"module\":\"%s\",\"text\":\"%s\"}",
+             name, module_escaped, text_escaped);
     emit_raw(line);
 }
 
@@ -232,6 +301,10 @@ static int parse_rect(const char *text, int rect[4])
 #ifdef _WIN32
 typedef HMODULE lib_t;
 
+/* Set when a libvlc.dll was found but is not a 64-bit one (error 193): a portable 32-bit VLC
+ * is the usual cause of "not found" on a machine that has VLC. */
+static int g_libvlc_wrong_bitness = 0;
+
 static lib_t try_load_dir(const wchar_t *dir)
 {
     wchar_t path[1024];
@@ -239,7 +312,9 @@ static lib_t try_load_dir(const wchar_t *dir)
     _snwprintf(path, 1024, L"%ls\\libvlc.dll", dir);
     path[1023] = 0;
     /* The altered search path lets libvlc.dll find libvlccore.dll beside it. */
-    return LoadLibraryExW(path, NULL, LOAD_WITH_ALTERED_SEARCH_PATH);
+    lib_t lib = LoadLibraryExW(path, NULL, LOAD_WITH_ALTERED_SEARCH_PATH);
+    if (!lib && GetLastError() == ERROR_BAD_EXE_FORMAT) g_libvlc_wrong_bitness = 1;
+    return lib;
 }
 
 static lib_t load_libvlc(void)
@@ -261,7 +336,9 @@ static lib_t load_libvlc(void)
         }
     }
     if ((lib = try_load_dir(L"C:\\Program Files\\VideoLAN\\VLC"))) return lib;
-    return LoadLibraryW(L"libvlc.dll");
+    lib = LoadLibraryW(L"libvlc.dll");
+    if (!lib && GetLastError() == ERROR_BAD_EXE_FORMAT) g_libvlc_wrong_bitness = 1;
+    return lib;
 }
 
 static void *lib_symbol(lib_t lib, const char *name)
@@ -316,6 +393,8 @@ static int bind_libvlc(lib_t lib)
     BIND(player_get_state, "libvlc_media_player_get_state");
     BIND(video_set_mouse_input, "libvlc_video_set_mouse_input");
     BIND(video_set_key_input, "libvlc_video_set_key_input");
+    *(void **)(&vlc.log_set) = lib_symbol(lib, "libvlc_log_set");
+    *(void **)(&vlc.log_get_context) = lib_symbol(lib, "libvlc_log_get_context");
 #ifdef _WIN32
     BIND(player_set_hwnd, "libvlc_media_player_set_hwnd");
 #else
@@ -404,6 +483,50 @@ static int parent_alive(void)
     DWORD rc = WaitForSingleObject(h, 0);
     CloseHandle(h);
     return rc == WAIT_TIMEOUT;
+}
+
+typedef struct {
+    char text[700];
+    size_t len;
+    int count;
+} child_list_t;
+
+static BOOL CALLBACK child_list_cb(HWND hwnd, LPARAM param)
+{
+    child_list_t *list = (child_list_t *)param;
+    char cls[80] = "";
+    RECT rc = {0, 0, 0, 0};
+    GetClassNameA(hwnd, cls, sizeof cls);
+    GetClientRect(hwnd, &rc);
+    list->count++;
+    if (list->len + 120 < sizeof list->text) {
+        list->len += (size_t)snprintf(list->text + list->len, sizeof list->text - list->len,
+                                      "; %s %ldx%ld %s", cls, (long)rc.right, (long)rc.bottom,
+                                      IsWindowVisible(hwnd) ? "visible" : "hidden");
+    }
+    return TRUE;
+}
+
+/* What the window tree looks like a few seconds into the playback: a black picture with no window
+ * of libVLC's below the player's own means libVLC never made its video output. */
+static void report_window(void)
+{
+    child_list_t list;
+    RECT rc = {0, 0, 0, 0}, parent_rc = {0, 0, 0, 0};
+    HWND parent = GetParent(g_child);
+    memset(&list, 0, sizeof list);
+    GetClientRect(g_child, &rc);
+    if (parent) GetClientRect(parent, &parent_rc);
+    EnumChildWindows(g_child, child_list_cb, (LPARAM)&list);
+    char head[160], text[sizeof list.text + sizeof head];
+    snprintf(head, sizeof head, "player window %ldx%ld %s, parent %ldx%ld, %d child windows",
+             (long)rc.right, (long)rc.bottom, IsWindowVisible(g_child) ? "visible" : "hidden",
+             (long)parent_rc.right, (long)parent_rc.bottom, list.count);
+    snprintf(text, sizeof text, "%s%s", head, list.text);
+    char escaped[1500], line[1600];
+    json_escape(escaped, sizeof escaped, text);
+    snprintf(line, sizeof line, "{\"event\":\"window\",\"text\":\"%s\"}", escaped);
+    emit_raw(line);
 }
 #else
 static int ignore_x_error(Display *dpy, XErrorEvent *ev)
@@ -570,18 +693,40 @@ static void report_video_size(libvlc_media_t *media, unsigned last[4])
  * window thread would freeze the parent process through the shared input queue. */
 static int run_player(void)
 {
-    const char *args[] = {"--quiet", "--stats", "--no-video-title-show", "--no-osd"};
-    libvlc_instance_t *inst = vlc.new_instance(4, args);
+    /* With a log callback libVLC's messages become "log" events; without one they are silenced. */
+    const char *args[24] = {"--stats", "--no-video-title-show", "--no-osd", vlc.log_set ? "--verbose=0" : "--quiet"};
+    int argc = 4;
+    const char *extra_env = getenv("VLC_REC_VLC_ARGS");
+    char *extra = extra_env ? strdup(extra_env) : NULL;
+    if (extra) {
+        for (char *token = strtok(extra, " "); token && argc < 24; token = strtok(NULL, " ")) {
+            args[argc++] = token;
+            if (strncmp(token, "--verbose=", 10) == 0) {
+                int verbose = atoi(token + 10);
+                g_log_min_level = verbose >= 2 ? 0 : verbose == 1 ? 2 : 3;
+            }
+        }
+    }
+    libvlc_instance_t *inst = vlc.new_instance(argc, args);
+    free(extra); /* libVLC has copied the options */
     if (!inst) {
         const char *err = vlc.errmsg();
         emit_error("libvlc-init", "libVLC could not start: %s", err ? err : "unknown error");
         return 1;
     }
+    if (vlc.log_set) vlc.log_set(inst, log_callback, NULL);
     libvlc_media_t *media = vlc.media_new_location(inst, g_url);
     if (!media) {
         emit_error("bad-url", "libVLC rejected the stream address.");
         vlc.release(inst);
         return 1;
+    }
+    if (g_caching >= 0) {
+        char option[64];
+        snprintf(option, sizeof option, ":network-caching=%d", g_caching);
+        vlc.media_add_option(media, option);
+        snprintf(option, sizeof option, ":live-caching=%d", g_caching);
+        vlc.media_add_option(media, option);
     }
     if (g_record) {
         char *sout = build_sout();
@@ -621,6 +766,9 @@ static int run_player(void)
     unsigned video_size[4] = {0, 0, 0, 0};
     for (int tick = 0; !g_stop; tick++) {
         sleep_ms(200);
+#ifdef _WIN32
+        if (tick == 14) report_window();
+#endif
         /* For the first 10 s, until the size is known, it is polled every tick so the
          * layout settles quickly; a stream without video size falls back to once a second. */
         if ((!video_size[0] && tick < 50) || tick % 5 == 4) report_video_size(media, video_size);
@@ -636,8 +784,11 @@ static int run_player(void)
         vlc_stats_t stats;
         memset(&stats, 0, sizeof stats);
         vlc.media_get_stats(media, &stats);
-        char line[128];
-        snprintf(line, sizeof line, "{\"event\":\"stats\",\"state\":%d,\"readBytes\":%d}", state, stats.i_read_bytes);
+        char line[200];
+        snprintf(line, sizeof line,
+                 "{\"event\":\"stats\",\"state\":%d,\"readBytes\":%d,\"decoded\":%d,\"displayed\":%d,\"lost\":%d}",
+                 state, stats.i_read_bytes, stats.i_decoded_video, stats.i_displayed_pictures,
+                 stats.i_lost_pictures);
         emit_raw(line);
     }
 
@@ -684,6 +835,7 @@ int main(int argc, char **argv)
         else if (strcmp(argv[i], "--url-hex") == 0) url_hex = argv[i + 1];
         else if (strcmp(argv[i], "--record-hex") == 0) record_hex = argv[i + 1];
         else if (strcmp(argv[i], "--mux") == 0) g_mux = argv[i + 1];
+        else if (strcmp(argv[i], "--caching") == 0) g_caching = atoi(argv[i + 1]);
         else if (strcmp(argv[i], "--rect") == 0) parse_rect(argv[i + 1], g_rect);
     }
 #ifdef _WIN32
@@ -703,6 +855,7 @@ int main(int argc, char **argv)
         emit_error("bad-arguments", "Required arguments are missing or invalid.");
         return 2;
     }
+    if (g_caching > 60000) g_caching = 60000;
     if (strcmp(g_mux, "mkv") != 0 && strcmp(g_mux, "mp4") != 0) {
         emit_error("bad-arguments", "Unsupported container.");
         return 2;
@@ -714,6 +867,14 @@ int main(int argc, char **argv)
 
     lib_t lib = load_libvlc();
     if (!lib) {
+#ifdef _WIN32
+        if (g_libvlc_wrong_bitness) {
+            emit_error("libvlc-not-found", "libVLC was not found: the libvlc.dll that exists is 32-bit, "
+                       "and this player is 64-bit. Install VLC 3 for 64-bit Windows, or point "
+                       "VLC_REC_LIBVLC_DIR at one.");
+            return 3;
+        }
+#endif
         emit_error("libvlc-not-found", "libVLC was not found. Install VLC 3.");
         return 3;
     }
