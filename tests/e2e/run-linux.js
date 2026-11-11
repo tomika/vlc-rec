@@ -20,10 +20,15 @@ function inContainer(name, display, mode) {
     // Work on a copy: nothing in the mounted repository may change except e2e-output.
     "mkdir /tmp/repo",
     "cp -r /repo/src /repo/assets /repo/bin /repo/player /repo/tests /repo/neutralino.config.json /tmp/repo/",
-    `E2E_OUT=/out/${name} bash /repo/tests/e2e/linux/session.sh ${display} node /tmp/repo/tests/e2e/run-e2e.js --mode ${mode}`
+    // The fake camera of the camera scenario.
+    "mkdir -p /tmp/repo/tools/camera && cp /repo/tools/camera/fake_osc_camera.py /tmp/repo/tools/camera/",
+    `E2E_ONLY=${process.env.E2E_ONLY || ""} E2E_OUT=/out/${name} bash /repo/tests/e2e/linux/session.sh ${display} node /tmp/repo/tests/e2e/run-e2e.js --mode ${mode}`
   ].join(" && ");
   return run([
     "run", "--rm", "--name", `vlc-rec-e2e-${name}`, "--shm-size=256m",
+    // E2E_HOST_NETWORK=1 reaches a real camera on the LAN; E2E_PARAMS is merged into the settings file.
+    ...(process.env.E2E_HOST_NETWORK ? ["--network", "host"] : []),
+    "-e", `E2E_PARAMS=${process.env.E2E_PARAMS || ""}`,
     "-v", `${repo}:/repo:ro`, "-v", `${path.join(repo, "e2e-output")}:/out`,
     IMAGE, "bash", "-c", script
   ]);

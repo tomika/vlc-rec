@@ -51,6 +51,86 @@ function killProcess(pid) {
   }
 }
 
+// ---- camera scenario: a fake OSC camera, and real mouse and keyboard input through the X server ----
+let fakeCamera = null;
+function startFakeCamera() {
+  const log = fs.openSync(path.join(OUT, "camera-fake.log"), "w");
+  fakeCamera = spawn("python3", ["-I", path.join(repo, "tools", "camera", "fake_osc_camera.py")], { stdio: ["ignore", log, log] });
+}
+function stopFakeCamera() {
+  if (fakeCamera) killProcess(fakeCamera.pid);
+  fakeCamera = null;
+}
+
+// Absolute screen position of the client area of the app window.
+function windowOrigin() {
+  const out = spawnSync(XWININFO, ["-name", "VLC Stream Recorder"], { encoding: "utf8" }).stdout || "";
+  const x = /Absolute upper-left X:\s+(-?\d+)/.exec(out);
+  const y = /Absolute upper-left Y:\s+(-?\d+)/.exec(out);
+  return x && y ? { x: Number(x[1]), y: Number(y[1]) } : null;
+}
+
+// steps: { move: [x, y] } in client coordinates, { click: 1 }, { wheel: "up" | "down" }, { key: "Right" }
+async function sendInput(request) {
+  const origin = windowOrigin();
+  if (!origin) return [{ name: "app window found for input", ok: false, detail: "xwininfo" }];
+  for (const step of request.steps) {
+    let args = null;
+    if (step.move) args = ["mousemove", String(origin.x + step.move[0]), String(origin.y + step.move[1])];
+    else if (step.click) args = ["click", String(step.click)];
+    else if (step.wheel) args = ["click", step.wheel === "up" ? "4" : "5"];
+    else if (step.key) args = ["key", step.key];
+    if (args) spawnSync("xdotool", args);
+    await sleep(step.wait || 150);
+  }
+  return [{ name: "input sent", ok: true, detail: `window at ${origin.x},${origin.y}` }];
+}
+
+// What reached the fake camera. A click right of the middle at zoom 0 and a level camera:
+// u = 0.5 and a field of view of 76 degrees: atan(tan(38 deg) * 0.5) = 21.3 degrees to the right,
+// so the pan value goes to about -21.
+function cameraChecks() {
+  const text = fs.existsSync(path.join(OUT, "camera-fake.log")) ? fs.readFileSync(path.join(OUT, "camera-fake.log"), "utf8") : "";
+  const lines = text.split("\n");
+  const turns = lines.filter((l) => l.includes("SetGimMotorDegree")).map((l) => JSON.parse(l.replace(/^.*SetGimMotorDegree /, "")));
+  const zooms = lines.filter((l) => l.includes("/SetZoom [")).map((l) => JSON.parse(l.replace(/^.*SetZoom /, ""))[0]);
+  const near = (a, b) => Math.abs(a - b) <= 1;
+  const first = turns[0];
+  const second = turns[1];
+  return [
+    { name: "click on the picture turned the camera to the right", ok: Boolean(first) && near(first[1], -21) && near(first[2], 0), detail: JSON.stringify(first) },
+    { name: "mouse wheel up zoomed in", ok: zooms.includes(2), detail: JSON.stringify(zooms) },
+    { name: "arrow key nudged the pan by 2 degrees", ok: Boolean(first && second) && near(second[1], first[1] - 2) && near(second[2], first[2]), detail: JSON.stringify(second) },
+    { name: "up key nudged the tilt", ok: turns.length >= 3 && near(turns[2][2], turns[1][2] - 2), detail: JSON.stringify(turns[2]) }
+  ];
+}
+
+// Does the picture move? Consecutive screenshots of the whole screen are compared: the window
+// is the only thing that changes, and in it the elapsed time (a few hundred pixels) and the
+// video. A frozen picture differs by the clock only; a live camera picture, even of a still
+// room, differs in tens of thousands of pixels.
+function motionChecks() {
+  const files = [];
+  for (let i = 1; i <= 6; i += 1) {
+    const file = path.join(OUT, `${currentScenario}-m${i}.png`);
+    if (fs.existsSync(file)) files.push(file);
+  }
+  if (files.length < 2) return [{ name: "screenshots for the motion check", ok: false, detail: `${files.length} found` }];
+  const shots = files.map((file) => readPng(file));
+  const diffs = [];
+  for (let i = 1; i < shots.length; i += 1) {
+    const a = shots[i - 1].pixels, b = shots[i].pixels;
+    const step = shots[i].channels;
+    let count = 0;
+    for (let p = 0; p < b.length; p += step) {
+      if (Math.abs(a[p] - b[p]) + Math.abs(a[p + 1] - b[p + 1]) + Math.abs(a[p + 2] - b[p + 2]) > 6) count += 1;
+    }
+    diffs.push(count);
+  }
+  const moving = diffs.filter((count) => count > 5000).length;
+  return [{ name: "the picture moves between screenshots", ok: moving >= Math.ceil(diffs.length / 2), detail: `changed pixels between consecutive shots: ${diffs.join(", ")}` }];
+}
+
 function screenshot(file) {
   if (WIN) {
     const script = [
@@ -218,6 +298,13 @@ async function runScenario(scenario, env) {
   const { app, binary: plainBinary } = prepareApp(scenario);
   const binary = APPIMAGE || plainBinary;
   const dir = path.join(app, "e2e");
+  // E2E_PARAMS (a JSON object) is merged into the settings file of every scenario.
+  const params = { ...(scenario === "camera" ? { camera_ip: "127.0.0.1" } : {}), ...(process.env.E2E_PARAMS ? JSON.parse(process.env.E2E_PARAMS) : {}) };
+  if (Object.keys(params).length) fs.writeFileSync(path.join(app, "vlc_rec_params.json"), JSON.stringify(params));
+  if (scenario === "camera") {
+    startFakeCamera();
+    await sleep(500);
+  }
   const logFile = fs.openSync(path.join(OUT, `${scenario}-neutralino.log`), "w");
   // The driver writes the video size the stub reports into this file.
   const stubVideo = { LIBVLC_STUB_VIDEO_FILE: path.join(dir, "stub-video.txt") };
@@ -243,6 +330,9 @@ async function runScenario(scenario, env) {
       if (request.action === "screenshot") reply = { checks: screenChecks(name, request) };
       else if (request.action === "verify") reply = { checks: verifyFile(request) };
       else if (request.action === "dialog") reply = { checks: await checkDialog(name, request) };
+      else if (request.action === "input") reply = { checks: await sendInput(request) };
+      else if (request.action === "camera-verify") reply = { checks: cameraChecks() };
+      else if (request.action === "motion-verify") reply = { checks: motionChecks() };
       else if (name === "kill-player") killPlayer();
       else if (name === "kill-source") stopSource();
       else if (name === "start-source") startSource();
@@ -294,6 +384,7 @@ async function runScenario(scenario, env) {
     await sleep(1500);
   }
 
+  if (scenario === "camera") stopFakeCamera();
   const neutralinoLog = path.join(app, "neutralinojs.log");
   // Not copyFileSync: it also copies permissions, which a mounted Windows folder refuses.
   if (fs.existsSync(neutralinoLog)) fs.writeFileSync(path.join(OUT, `${scenario}-app.log`), fs.readFileSync(neutralinoLog));
@@ -318,6 +409,8 @@ async function main() {
     await sleep(1500);
     await runScenario("main", baseEnv);
     await runScenario("aspect", baseEnv);
+    await runScenario("camera", baseEnv);
+    await runScenario("motion", baseEnv);
     await runScenario("closewhile", baseEnv);
     await runScenario("hardkill", baseEnv);
     if (APPIMAGE) await runScenario("dialogs", baseEnv);
@@ -329,6 +422,7 @@ async function main() {
 
 main().catch((err) => {
   stopSource();
+  stopFakeCamera();
   console.error(err);
   process.exit(2);
 });

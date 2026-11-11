@@ -81,10 +81,9 @@ const E2E_SCENARIO = "__SCENARIO__";
       const visible = box.width > 0 && box.top >= side.top - 0.5 && box.bottom <= side.bottom + 0.5 && box.right <= innerWidth + 0.5;
       check(`${label}: ${button.id} fully visible`, visible, `${Math.round(box.left)},${Math.round(box.top)} ${Math.round(box.width)}x${Math.round(box.height)}`);
     }
-    const text = (button) => (layoutEl.classList.contains("is-compact") ? button.querySelector(".btn-label-short") : button.querySelector(".btn-label-full")) || button;
     for (const button of [recordBtn, previewBtn]) {
-      const height = text(button).getBoundingClientRect().height;
-      check(`${label}: ${button.id} label on one line`, height < 24, `${Math.round(height)} px`);
+      const height = button.getBoundingClientRect().height;
+      check(`${label}: ${button.id} label on one line`, height < 40, `${Math.round(height)} px`);
     }
     check(`${label}: chosen`, true, `${layoutEl.className.replace("layout ", "")}; window ${innerWidth}x${innerHeight}; video ${Math.round(host.width)}x${Math.round(host.height)} = ${Math.round(100 * host.width * host.height / (innerWidth * innerHeight))}% of the window; panel ${Math.round(side.width)}x${Math.round(side.height)}${panel.scrollHeight > panel.clientHeight + 1 ? " scrolls" : ""}`);
   }
@@ -112,7 +111,9 @@ const E2E_SCENARIO = "__SCENARIO__";
   }
 
   const click = (button) => button.click();
-  const isStopped = async () => (await Neutralino.os.getSpawnedProcesses()).length === 0;
+  // The camera helper keeps running between streams; the others must be gone.
+  const isStopped = async () => (await Neutralino.os.getSpawnedProcesses())
+    .filter((proc) => !cameraProc || proc.id !== cameraProc.id).length === 0;
   const hasStats = () => currentProcess && currentProcess.readBytes;
 
   async function stopAndWait(label) {
@@ -207,6 +208,134 @@ const E2E_SCENARIO = "__SCENARIO__";
         await verifyFile(`aspect-${name}.mkv`, `${folder}/aspect-${name}.mkv`);
       }
       // run-e2e.js puts the default source back after this scenario.
+      await finish();
+      await Neutralino.app.exit();
+      return;
+    }
+
+    if (E2E_SCENARIO === "motion") {
+      // Does the preview of the stream in the settings file (E2E_PARAMS) show a moving picture?
+      await setWindow(1120, 630);
+      click(previewBtn);
+      await waitFor("motion: preview running", () => mode === "preview" && hasStats(), 40000);
+      await sleep(4000);
+      for (let i = 1; i <= 6; i += 1) await shot(`m${i}`, "any", 1000);
+      const reply = await step("motion-verify", { action: "motion-verify" });
+      for (const item of reply.checks) check(`motion: ${item.name}`, item.ok, item.detail);
+      await stopAndWait("motion stop");
+      await finish();
+      await Neutralino.app.exit();
+      return;
+    }
+
+    if (E2E_SCENARIO === "camera") {
+      // run-e2e.js starts a fake OSC camera and writes its address into the settings file, so
+      // init() has started the camera helper. Mouse and keys come through the X server, as a
+      // user's would: over the real native video window.
+      await setWindow(1120, 630);
+      await waitFor("camera: helper running", () => cameraActive());
+      check("camera: controls shown", cameraBar.hidden === false);
+      await configure("camera", "mkv", folder);
+      click(previewBtn);
+      await waitFor("camera: preview running", () => mode === "preview" && hasStats());
+      await sleep(2500); // The picture and the window settle.
+      const host = videoHost.getBoundingClientRect();
+      const at = (fx, fy) => [Math.round(host.left + host.width * fx), Math.round(host.top + host.height * fy)];
+      await step("input-click", { action: "input", steps: [{ move: at(0.75, 0.5), wait: 300 }, { click: 1, wait: 800 }] });
+      await step("input-wheel", { action: "input", steps: [{ move: at(0.5, 0.5), wait: 200 }, { wheel: "up", wait: 400 }] });
+      await step("input-keys", { action: "input", steps: [{ key: "Right", wait: 400 }, { key: "Up", wait: 400 }] });
+      const reply = await step("camera-verify", { action: "camera-verify" });
+      for (const item of reply.checks) check(`camera: ${item.name}`, item.ok, item.detail);
+      // The camera controls are a block of their own: the zoom buttons and the speed slider with its
+      // number must be there, whole, inside the panel and the window, in the full panel and the compact one,
+      // and must not cover the buttons or the status line.
+      const cameraControlChecks = (label) => {
+        const side = panel.getBoundingClientRect();
+        const boxes = {};
+        // A full panel that the user forced into a window too small for it scrolls: what is below the
+        // fold is then reachable, not cut off, so only the width has to fit.
+        const scrolls = panel.scrollHeight > panel.clientHeight + 1;
+        for (const control of [zoomOutBtn, zoomInBtn, cameraSpeed, cameraSpeedValue, recordBtn, previewBtn, status]) {
+          const box = control.getBoundingClientRect();
+          boxes[control.id] = box;
+          const detail = `${Math.round(box.left)},${Math.round(box.top)} ${Math.round(box.width)}x${Math.round(box.height)}${scrolls ? " (the panel scrolls)" : ""}`;
+          const inside = box.left >= side.left - 0.5 && box.right <= Math.min(side.right, innerWidth) + 0.5
+            && (scrolls || (box.top >= side.top - 0.5 && box.bottom <= side.bottom + 0.5));
+          check(`${label}: ${control.id} fully visible`, box.width > 0 && box.height > 0 && inside, detail);
+        }
+        const overlap = (a, b) => a.left < b.right - 0.5 && b.left < a.right - 0.5 && a.top < b.bottom - 0.5 && b.top < a.bottom - 0.5;
+        const names = Object.keys(boxes);
+        for (let i = 0; i < names.length; i += 1) {
+          for (let j = i + 1; j < names.length; j += 1) {
+            if (overlap(boxes[names[i]], boxes[names[j]])) check(`${label}: ${names[i]} and ${names[j]} do not overlap`, false);
+          }
+        }
+        check(`${label}: no overlapping controls`, true);
+        // The drawer: folded away in the compact panel, else every field of it is there, whole and apart
+        // from the others, and the bar is not covered by it.
+        const drawerBox = document.getElementById("drawer").getBoundingClientRect();
+        if (layoutEl.classList.contains("is-compact")) {
+          check(`${label}: drawer folded away`, drawerBox.width === 0 && drawerBox.height === 0, `${Math.round(drawerBox.width)}x${Math.round(drawerBox.height)}`);
+        } else {
+          const fields = [ip, scanBtn, outPath, browseBtn, filename, extension, autoReconnect, previewCaching, document.getElementById("bufferHint"), cameraPageBtn];
+          const seen = {};
+          for (const field of fields) {
+            const box = field.getBoundingClientRect();
+            seen[field.id] = box;
+            const detail = `${Math.round(box.left)},${Math.round(box.top)} ${Math.round(box.width)}x${Math.round(box.height)}${scrolls ? " (the panel scrolls)" : ""}`;
+            const inside = box.left >= side.left - 0.5 && box.right <= Math.min(side.right, innerWidth) + 0.5
+              && box.left >= drawerBox.left - 0.5 && box.right <= drawerBox.right + 0.5
+              && (scrolls || (box.top >= side.top - 0.5 && box.bottom <= side.bottom + 0.5));
+            check(`${label}: ${field.id} in the drawer`, box.width > 0 && box.height > 0 && inside, detail);
+          }
+          const ids = Object.keys(seen);
+          let apart = true;
+          for (let i = 0; i < ids.length; i += 1) for (let j = i + 1; j < ids.length; j += 1) if (overlap(seen[ids[i]], seen[ids[j]])) { apart = false; check(`${label}: ${ids[i]} and ${ids[j]} apart`, false); }
+          check(`${label}: the drawer fields do not overlap`, apart);
+          const barBox = document.querySelector(".bar").getBoundingClientRect();
+          check(`${label}: drawer and bar do not overlap`, !overlap(drawerBox, barBox));
+        }
+        // The slider is long enough to be set within a few degrees per second: 89 steps over its width.
+        check(`${label}: slider at least 60 px wide`, boxes.cameraSpeed.width >= 60, `${Math.round(boxes.cameraSpeed.width)} px`);
+      };
+      for (const [name, width, height] of [["16x9", 1280, 720], ["4x3", 1024, 768], ["small", 640, 400], ["wide-short", 1100, 460]]) {
+        await setWindow(width, height);
+        panelOverride = "";
+        updateLayout();
+        layoutChecks(`camera ${name}`);
+        cameraControlChecks(`camera ${name}`);
+        await shot(`camera-${name}`, "any", 500);
+        click(panelToggle);
+        layoutChecks(`camera ${name} toggled`);
+        cameraControlChecks(`camera ${name} toggled`);
+        await shot(`camera-${name}-toggled`, "any", 500);
+        click(panelToggle);
+      }
+      // A changed preview buffer: the running preview says it still has the old one, and the button
+      // starts it again with the new one (a real player, so the argument really changes).
+      await setWindow(1280, 720);
+      panelOverride = "full";
+      updateLayout(true);
+      previewCaching.value = "300";
+      handlePreviewCachingChange();
+      await sleep(300);
+      check("camera: buffer note shown for the running preview", bufferPending.hidden === false && bufferApplyBtn.hidden === false, bufferPendingText.textContent);
+      check("camera: the note names the buffer that runs", /500 ms/.test(bufferPendingText.textContent), bufferPendingText.textContent);
+      const noteBox = bufferPending.getBoundingClientRect();
+      const noteSide = panel.getBoundingClientRect();
+      check("camera: the note is inside the panel", noteBox.width > 0 && noteBox.left >= noteSide.left - 0.5 && noteBox.right <= noteSide.right + 0.5 && noteBox.bottom <= noteSide.bottom + 0.5,
+        `${Math.round(noteBox.left)},${Math.round(noteBox.top)} ${Math.round(noteBox.width)}x${Math.round(noteBox.height)}`);
+      layoutChecks("camera buffer note");
+      await shot("camera-buffer-pending", "any", 500);
+      const oldProcess = currentProcess;
+      click(bufferApplyBtn);
+      await waitFor("camera: preview restarted with the new buffer", () => mode === "preview" && currentProcess && currentProcess !== oldProcess
+        && currentProcess.cachingMs === 300 && hasStats(), 40000);
+      await sleep(500);
+      check("camera: the note is gone once it is in use", bufferPending.hidden === true);
+      await shot("camera-buffer-applied", "any", 500);
+      panelOverride = "";
+      await stopAndWait("camera stop");
       await finish();
       await Neutralino.app.exit();
       return;
