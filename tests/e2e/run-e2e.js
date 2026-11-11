@@ -86,6 +86,16 @@ async function sendInput(request) {
   return [{ name: "input sent", ok: true, detail: `window at ${origin.x},${origin.y}` }];
 }
 
+// Everything the fake camera has been told so far: the turns as [speed, pan, tilt] and the zoom values, in the camera's numbers.
+function cameraCommands() {
+  const text = fs.existsSync(path.join(OUT, "camera-fake.log")) ? fs.readFileSync(path.join(OUT, "camera-fake.log"), "utf8") : "";
+  const lines = text.split("\n");
+  return {
+    turns: lines.filter((l) => l.includes("SetGimMotorDegree")).map((l) => JSON.parse(l.replace(/^.*SetGimMotorDegree /, ""))),
+    zooms: lines.filter((l) => l.includes("/SetZoom [")).map((l) => JSON.parse(l.replace(/^.*SetZoom /, ""))[0])
+  };
+}
+
 // What reached the fake camera. A click right of the middle at zoom 0 and a level camera:
 // u = 0.5 and a field of view of 76 degrees: atan(tan(38 deg) * 0.5) = 21.3 degrees to the right,
 // so the pan value goes to about -21.
@@ -339,6 +349,7 @@ async function runScenario(scenario, env) {
       else if (request.action === "dialog") reply = { checks: await checkDialog(name, request) };
       else if (request.action === "input") reply = { checks: await sendInput(request) };
       else if (request.action === "camera-verify") reply = { checks: cameraChecks() };
+      else if (request.action === "camera-state") reply = { checks: [], ...cameraCommands() };
       else if (request.action === "motion-verify") reply = { checks: motionChecks() };
       else if (name === "kill-player") killPlayer();
       else if (name === "kill-source") stopSource();

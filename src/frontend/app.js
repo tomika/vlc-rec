@@ -24,6 +24,7 @@ const scanResults = document.getElementById("scanResults");
 const videoHost = document.getElementById("videoHost");
 const layoutEl = document.getElementById("layout");
 const panel = document.getElementById("panel");
+const drawer = document.getElementById("drawer");
 const stage = document.getElementById("stage");
 const panelToggle = document.getElementById("panelToggle");
 const modeBadge = document.getElementById("modeBadge");
@@ -42,6 +43,9 @@ const cameraPageBtn = document.getElementById("cameraPageBtn");
 const cameraHintText = document.getElementById("cameraHint");
 const cameraZoomItem = document.getElementById("cameraZoomItem");
 const cameraSpeedItem = document.getElementById("cameraSpeedItem");
+const presetBar = document.getElementById("presetBar");
+const presetDrawer = document.getElementById("presetDrawer");
+const presetMenu = document.getElementById("presetMenu");
 
 const DEFAULT_PARAMS = {
   ip_address: "127.0.0.1:5000",
@@ -62,6 +66,9 @@ const DEFAULT_PARAMS = {
   camera_turn_speed: 10,
   camera_zoom_step: 10,
   camera_arrow_step_deg: 2,
+  // Camera presets 1 to 9: { "1": { pan, tilt, zoom }, ... }. A preset has a position (pan and tilt in degrees),
+  // a zoom (0..1 of the range of the camera), or both. The keys 1 to 9 apply one, Alt+number teaches it.
+  camera_presets: {},
   // VLC's own network caching (1000 ms) delays the picture by about that much. How small it can be
   // depends on the network and the computer: with the 4K stream of a Tail 2 over a LAN and software
   // decoding, 150 ms froze the picture, 250 ms and more moved, 500 ms lost none. 0 and up is taken as
@@ -586,7 +593,10 @@ async function loadParams() {
   }
 
   parameters.output_filename = `${new Date().toISOString().slice(0, 10)}.${inferExt(parameters.output_filename)}`;
+  parameters.camera_presets = normalizePresets(parameters.camera_presets);
 }
+
+let pendingParamsWrite = Promise.resolve();
 
 async function saveParams(ipAddress, outputPathValue, outputFilename) {
   parameters = {
@@ -595,7 +605,11 @@ async function saveParams(ipAddress, outputPathValue, outputFilename) {
     output_path: outputPathValue,
     output_filename: outputFilename
   };
-  await Neutralino.filesystem.writeFile(PARAMS_FILE, `${JSON.stringify(parameters, null, 2)}\n`);
+  const contents = `${JSON.stringify(parameters, null, 2)}\n`;
+  // Keep writes in the order of the user actions, even if the filesystem is slow.
+  const write = pendingParamsWrite.catch(() => {}).then(() => Neutralino.filesystem.writeFile(PARAMS_FILE, contents));
+  pendingParamsWrite = write;
+  await write;
 }
 
 function resetState(newStatus = "Stopped.", kind = "info") {
@@ -1177,6 +1191,9 @@ function cameraCan(feature) {
     case "nudge": return Boolean(ptz.nudge);
     case "speed": return Boolean(ptz.speed && typeof ptz.speed === "object");
     case "zoom": return Boolean(caps.zoom && caps.zoom.by);
+    // Absolute moves: the camera tells where it points (ptz.get, zoom.get) and goes there (ptz.moveTo, zoom.set).
+    case "moveTo": return Boolean(ptz.absolute);
+    case "zoomSet": return Boolean(caps.zoom && caps.zoom.absolute);
     default: return false;
   }
 }
@@ -1211,6 +1228,11 @@ function cameraHint() {
   if (cameraCan("centerOn")) parts.push("Click the picture to centre it.");
   if (cameraCan("zoom")) parts.push("Mouse wheel: zoom.");
   if (cameraCan("nudge")) parts.push("Arrow keys: turn (Shift: larger steps).");
+  if (presetsAvailable()) {
+    parts.push("Keys 1-9: apply a preset. Alt+number: teach it from the camera as it is now, Alt+Shift: position only, " +
+      "Alt+Ctrl: zoom only, Alt+Ctrl+Shift: delete. Key 0: the fixed wide shot with the camera centered. " +
+      "Right click a preset button in settings for a menu.");
+  }
   return parts.join(" ");
 }
 
@@ -1431,6 +1453,7 @@ function showCameraControls() {
     showCameraSpeed();
   }
   showCameraPage();
+  renderPresets();
   updateLayout();
 }
 
@@ -1616,9 +1639,7 @@ const ARROW_DIRECTIONS = {
 function handleArrowKey(evt) {
   const direction = ARROW_DIRECTIONS[evt.key];
   if (!direction || !cameraCan("nudge") || !scanDialog.hidden) return;
-  if (evt.ctrlKey || evt.altKey || evt.metaKey) return;
-  const tag = evt.target && evt.target.tagName ? String(evt.target.tagName).toUpperCase() : "";
-  if (tag === "INPUT" || tag === "TEXTAREA" || tag === "SELECT" || (evt.target && evt.target.isContentEditable)) return;
+  if (evt.ctrlKey || evt.altKey || evt.metaKey || isTypingTarget(evt)) return;
   evt.preventDefault();
   const now = Date.now();
   if (now - lastNudgeAt < CAMERA_NUDGE_INTERVAL_MS) return;
@@ -1629,11 +1650,328 @@ function handleArrowKey(evt) {
 }
 
 function handleKeyDown(evt) {
-  if (evt.key === "Escape" && !scanDialog.hidden) {
-    closeScanDialog();
+  if (evt.key === "Escape") {
+    if (!scanDialog.hidden) {
+      closeScanDialog();
+      return;
+    }
+    if (!presetMenu.hidden) {
+      closePresetMenu();
+      return;
+    }
+  }
+  if (!presetMenu.hidden && handlePresetMenuKey(evt)) return;
+  if (handlePresetKey(evt)) return;
+  handleArrowKey(evt);
+}
+
+// A key typed into a field, a list or a text area is not for the camera.
+function isTypingTarget(evt) {
+  const tag = evt.target && evt.target.tagName ? String(evt.target.tagName).toUpperCase() : "";
+  return tag === "INPUT" || tag === "TEXTAREA" || tag === "SELECT" || Boolean(evt.target && evt.target.isContentEditable);
+}
+
+// ---- camera presets ----
+// The presets belong to the app, not to the camera: a preset is a position (pan and tilt in degrees) and/or a
+// zoom (0..1) kept in the settings, and applying one is an absolute move (ptz.moveTo, zoom.set) on any camera
+// that can tell and take its position (the capabilities ptz.absolute and zoom.absolute). So every adapter that
+// can do those has nine presets, without a memory in the camera.
+
+const PRESET_SLOTS = 9;
+const presetRevisions = Array(PRESET_SLOTS + 1).fill(0);
+const PRESET_KIND_TEXT = { both: "position and zoom", position: "position", zoom: "zoom" };
+// Preset 0 is fixed: the whole scene, the camera straight ahead (0, 0) and zoomed out fully. It is not in the
+// settings, and it can be neither taught nor deleted.
+const HOME_PRESET = Object.freeze({ pan: 0, tilt: 0, zoom: 0 });
+const HOME_TEXT = "wide shot, camera centered";
+
+function presetOf(slot) {
+  return slot === 0 ? HOME_PRESET : parameters.camera_presets[slot];
+}
+
+// camera_presets as it comes from the settings file: only slots 1 to 9 with sensible numbers are kept.
+function normalizePresets(raw) {
+  const presets = {};
+  if (!raw || typeof raw !== "object") return presets;
+  for (let slot = 1; slot <= PRESET_SLOTS; slot += 1) {
+    const item = raw[slot];
+    if (!item || typeof item !== "object") continue;
+    const preset = {};
+    if (Number.isFinite(item.pan) && Number.isFinite(item.tilt) && Math.abs(item.pan) <= 360 && Math.abs(item.tilt) <= 360) {
+      preset.pan = item.pan;
+      preset.tilt = item.tilt;
+    }
+    if (Number.isFinite(item.zoom) && item.zoom >= 0 && item.zoom <= 1) preset.zoom = item.zoom;
+    if (preset.pan !== undefined || preset.zoom !== undefined) presets[slot] = preset;
+  }
+  return presets;
+}
+
+// "both", "position", "zoom", or "" for an empty slot.
+function presetKind(preset) {
+  if (!preset) return "";
+  const position = preset.pan !== undefined;
+  const zoom = preset.zoom !== undefined;
+  return position && zoom ? "both" : position ? "position" : zoom ? "zoom" : "";
+}
+
+function presetsAvailable() {
+  return cameraCan("moveTo") || cameraCan("zoomSet");
+}
+
+function presetTitle(slot, menuAvailable) {
+  if (slot === 0) return `Preset 0 (fixed: ${HOME_TEXT}). Click or key 0: apply. It cannot be taught or deleted.`;
+  const kind = presetKind(parameters.camera_presets[slot]);
+  const menuHint = menuAvailable ? "Right click: menu." : "Open settings for the preset menu.";
+  return kind
+    ? `Preset ${slot} (${PRESET_KIND_TEXT[kind]}). Click or key ${slot}: apply. ${menuHint}`
+    : `Preset ${slot} (empty). Alt+${slot} teaches it. ${menuHint}`;
+}
+
+function renderPresetRow(container) {
+  const buttons = [];
+  // 1 to 9, and 0 after them as on the keyboard.
+  for (const slot of [1, 2, 3, 4, 5, 6, 7, 8, 9, 0]) {
+    const kind = presetKind(presetOf(slot));
+    const button = document.createElement("button");
+    button.type = "button";
+    button.className = `preset-btn${kind ? ` is-${kind}` : ""}${slot === 0 ? " is-fixed" : ""}`;
+    button.textContent = String(slot);
+    button.title = presetTitle(slot, container === presetDrawer);
+    button.setAttribute("aria-label", presetTitle(slot, container === presetDrawer));
+    button.dataset.slot = String(slot);
+    button.addEventListener("click", () => applyPreset(slot));
+    button.addEventListener("contextmenu", (evt) => {
+      evt.preventDefault();
+      if (container === presetDrawer) openPresetMenu(slot, button);
+    });
+    buttons.push(button);
+  }
+  container.replaceChildren(...buttons);
+}
+
+// Two rows with the same buttons: the bar for compact mode and the settings drawer otherwise.
+function renderPresets() {
+  const available = presetsAvailable();
+  layoutEl.dataset.presets = available ? "on" : "off";
+  presetBar.hidden = !available;
+  presetDrawer.hidden = !available;
+  if (!available) {
+    closePresetMenu();
+    presetBar.replaceChildren();
+    presetDrawer.replaceChildren();
     return;
   }
-  handleArrowKey(evt);
+  renderPresetRow(presetBar);
+  renderPresetRow(presetDrawer);
+}
+
+function savePresets() {
+  renderPresets();
+  showCameraPage();
+  updateLayout(true);
+  saveParams(parameters.ip_address, parameters.output_path, parameters.output_filename)
+    .catch((err) => setCameraNote(`could not save presets: ${normalizeError(err)}`));
+}
+
+function applyPreset(slot) {
+  if (!presetsAvailable()) return;
+  const preset = presetOf(slot);
+  if (!preset) {
+    setCameraNote(`preset ${slot} is empty; Alt+${slot} teaches it.`);
+    return;
+  }
+  let sent = false;
+  if (preset.pan !== undefined && cameraCan("moveTo")) {
+    sendCameraRequest("ptz.moveTo", { pan: preset.pan, tilt: preset.tilt });
+    sent = true;
+  }
+  if (preset.zoom !== undefined && cameraCan("zoomSet")) {
+    sendCameraRequest("zoom.set", { value: preset.zoom });
+    sent = true;
+  }
+  setCameraNote(sent ? `preset ${slot} applied${slot === 0 ? ` (${HOME_TEXT})` : ""}.` : `this camera cannot apply preset ${slot}.`);
+}
+
+function noteFixedPreset() {
+  setCameraNote(`preset 0 is fixed (${HOME_TEXT}): it cannot be taught or deleted.`);
+}
+
+// Takes the position and/or the zoom from the camera as it is (or is going to be: the adapter answers with the
+// target while the camera is still turning). kind: "both" (as far as the camera can), "position" or "zoom".
+// A taught preset replaces the old one whole, so teaching the position of a position and zoom preset makes it
+// a position preset.
+async function teachPreset(slot, kind) {
+  if (slot === 0) {
+    noteFixedPreset();
+    return;
+  }
+  const proc = cameraProc;
+  if (!proc || !proc.caps || !presetsAvailable()) return;
+  const revision = ++presetRevisions[slot];
+  const position = kind !== "zoom" && cameraCan("moveTo");
+  const zoom = kind !== "position" && cameraCan("zoomSet");
+  if (!position && !zoom) {
+    setCameraNote(`this camera cannot report its ${kind === "zoom" ? "zoom" : "position"}.`);
+    return;
+  }
+  const preset = {};
+  try {
+    if (position) {
+      const pose = await cameraRequest(proc, "ptz.get");
+      if (!Number.isFinite(pose.pan) || !Number.isFinite(pose.tilt)) throw cameraError("device_error", "the camera sent no position.");
+      preset.pan = pose.pan;
+      preset.tilt = pose.tilt;
+    }
+    if (zoom) {
+      const level = await cameraRequest(proc, "zoom.get");
+      if (!Number.isFinite(level.value)) throw cameraError("device_error", "the camera sent no zoom.");
+      preset.zoom = Math.min(1, Math.max(0, level.value));
+    }
+  } catch (err) {
+    if (err.code !== "stopped" && cameraProc === proc && presetRevisions[slot] === revision) setCameraNote(`preset ${slot} was not taught: ${err.message}`);
+    return;
+  }
+  if (cameraProc !== proc || presetRevisions[slot] !== revision) return;
+  parameters.camera_presets = { ...parameters.camera_presets, [slot]: preset };
+  savePresets();
+  setCameraNote(`preset ${slot} taught: ${PRESET_KIND_TEXT[presetKind(preset)]}.`);
+}
+
+function deletePreset(slot) {
+  if (slot === 0) {
+    noteFixedPreset();
+    return;
+  }
+  presetRevisions[slot] += 1;
+  if (!parameters.camera_presets[slot]) {
+    setCameraNote(`preset ${slot} is empty.`);
+    return;
+  }
+  const rest = { ...parameters.camera_presets };
+  delete rest[slot];
+  parameters.camera_presets = rest;
+  savePresets();
+  setCameraNote(`preset ${slot} deleted.`);
+}
+
+// The digit of a number key, whatever the layout makes of it with Alt (on a Hungarian keyboard Alt+Ctrl is AltGr,
+// and the character is not the digit): 0 to 9, or -1 for any other key.
+function presetSlotOf(evt) {
+  const match = /^(?:Digit|Numpad)([0-9])$/.exec(String(evt.code || ""));
+  return match ? Number(match[1]) : -1;
+}
+
+// 1-9 apply, and 0 is the fixed wide shot. With Alt: Alt teaches position and zoom, Alt+Shift the position only,
+// Alt+Ctrl the zoom only, Alt+Ctrl+Shift deletes (for 1 to 9; 0 says that it is fixed). Returns true when the key
+// was for the presets. Ctrl+0 and Shift+0 are not: the browser zooms with them.
+function handlePresetKey(evt) {
+  const slot = presetSlotOf(evt);
+  if (slot < 0 || evt.metaKey || !presetsAvailable() || !scanDialog.hidden || isTypingTarget(evt)) return false;
+  let action = null;
+  if (!evt.altKey && !evt.ctrlKey && !evt.shiftKey) action = () => applyPreset(slot);
+  else if (evt.altKey && !evt.ctrlKey && !evt.shiftKey) action = () => teachPreset(slot, "both");
+  else if (evt.altKey && evt.shiftKey && !evt.ctrlKey) action = () => teachPreset(slot, "position");
+  else if (evt.altKey && evt.ctrlKey && !evt.shiftKey) action = () => teachPreset(slot, "zoom");
+  else if (evt.altKey && evt.ctrlKey && evt.shiftKey) action = () => deletePreset(slot);
+  if (!action) return false;
+  evt.preventDefault();
+  closePresetMenu();
+  // A held key does not repeat a teaching or an apply.
+  if (!evt.repeat) action();
+  return true;
+}
+
+// ---- the menu of a preset button ----
+// Keep the menu in the settings drawer, clear of the native video window.
+
+function menuItem(label, keys, enabled, run) {
+  const item = document.createElement("button");
+  item.type = "button";
+  item.className = "preset-menu-item";
+  item.setAttribute("role", "menuitem");
+  item.disabled = !enabled;
+  const text = document.createElement("span");
+  text.textContent = label;
+  const hint = document.createElement("span");
+  hint.className = "preset-menu-keys";
+  hint.textContent = keys;
+  item.replaceChildren(text, hint);
+  item.addEventListener("click", () => {
+    closePresetMenu();
+    run();
+  });
+  return item;
+}
+
+function openPresetMenu(slot, anchor) {
+  if (!presetsAvailable()) return;
+  closePresetMenu();
+  const preset = presetOf(slot);
+  // The fixed preset 0 can be applied and nothing else.
+  const fixed = slot === 0;
+  const canPosition = cameraCan("moveTo") && !fixed;
+  const canZoom = cameraCan("zoomSet") && !fixed;
+  const title = document.createElement("div");
+  title.className = "preset-menu-title";
+  title.textContent = fixed ? `Preset 0: fixed, ${HOME_TEXT}` : `Preset ${slot}: ${PRESET_KIND_TEXT[presetKind(preset)] || "empty"}`;
+  presetMenu.replaceChildren(
+    title,
+    menuItem("Apply", String(slot), Boolean(preset), () => applyPreset(slot)),
+    menuItem("Teach position and zoom", `Alt+${slot}`, canPosition || canZoom, () => teachPreset(slot, "both")),
+    menuItem("Teach position only", `Alt+Shift+${slot}`, canPosition, () => teachPreset(slot, "position")),
+    menuItem("Teach zoom only", `Alt+Ctrl+${slot}`, canZoom, () => teachPreset(slot, "zoom")),
+    menuItem("Delete", `Alt+Ctrl+Shift+${slot}`, Boolean(preset) && !fixed, () => deletePreset(slot))
+  );
+  presetMenu.hidden = false;
+
+  // Keep the menu inside the visible part of the drawer, even when the panel scrolls.
+  const margin = 4;
+  const drawerBox = drawer.getBoundingClientRect();
+  const panelBox = panel.getBoundingClientRect();
+  const bounds = {
+    left: Math.max(margin, drawerBox.left, panelBox.left),
+    top: Math.max(margin, drawerBox.top, panelBox.top),
+    right: Math.min(window.innerWidth || 1280, drawerBox.right, panelBox.right) - margin,
+    bottom: Math.min(window.innerHeight || 720, drawerBox.bottom, panelBox.bottom) - margin
+  };
+  presetMenu.style.maxWidth = `${Math.max(1, bounds.right - bounds.left)}px`;
+  presetMenu.style.maxHeight = `${Math.max(1, bounds.bottom - bounds.top)}px`;
+  const anchorBox = anchor.getBoundingClientRect();
+  const size = presetMenu.getBoundingClientRect();
+  const left = Math.max(bounds.left, Math.min(anchorBox.left, bounds.right - size.width));
+  const below = anchorBox.bottom + margin;
+  const top = below + size.height <= bounds.bottom ? below : Math.max(bounds.top, Math.min(anchorBox.top - size.height - margin, bounds.bottom - size.height));
+  presetMenu.style.left = `${Math.round(left)}px`;
+  presetMenu.style.top = `${Math.round(top)}px`;
+  const first = Array.from(presetMenu.children || []).find((child) => child.disabled === false);
+  if (first) first.focus();
+}
+
+function closePresetMenu() {
+  if (presetMenu.hidden) return;
+  presetMenu.hidden = true;
+  presetMenu.replaceChildren();
+}
+
+// Up and down move through the items. The arrow keys must not turn the camera while the menu is open.
+function handlePresetMenuKey(evt) {
+  if (!ARROW_DIRECTIONS[evt.key]) return false;
+  evt.preventDefault();
+  if (evt.key === "ArrowLeft" || evt.key === "ArrowRight") return true;
+  const items = Array.from(presetMenu.children || []).filter((child) => child.disabled === false);
+  if (!items.length) return true;
+  const current = items.findIndex((child) => child === document.activeElement);
+  const next = evt.key === "ArrowDown" ? (current + 1) % items.length : (current <= 0 ? items.length - 1 : current - 1);
+  items[next].focus();
+  return true;
+}
+
+// A press outside the menu closes it.
+function handleWindowPointerDown(evt) {
+  if (presetMenu.hidden) return;
+  const inside = typeof presetMenu.contains === "function" && presetMenu.contains(evt.target);
+  if (!inside) closePresetMenu();
 }
 
 function videoRectArg() {
@@ -1786,7 +2124,8 @@ function chooseLayout(stages, aspect, current, wasCompact = false) {
     return { ...layout, index, area: video.width * video.height };
   });
   const best = (compact) => {
-    const options = scored.filter((item) => item.compact === compact);
+    const options = scored.filter((item) => item.compact === compact &&
+      !(compact && presetsAvailable() && item.name !== "stack"));
     const top = options.reduce((a, b) => (b.area > a.area ? b : a));
     const kept = current && options.find((item) => item.name === current.name);
     return kept && kept.area >= top.area * LAYOUT_KEEP_SHARE ? kept : top;
@@ -1816,7 +2155,7 @@ function syncPlayerRect() {
 
 function layoutInputKey() {
   return [window.innerWidth, window.innerHeight, window.devicePixelRatio, videoAspect, mode,
-    startingStream, panelOverride, videoHost.hidden, cameraBar.hidden, cameraPage.hidden].join("|");
+    startingStream, panelOverride, videoHost.hidden, cameraBar.hidden, cameraPage.hidden, presetBar.hidden].join("|");
 }
 
 // Measuring switches the panel through every layout, which can clamp its scroll
@@ -1846,6 +2185,8 @@ function keepPanelState(fn) {
 function updateLayout(force = false) {
   if (!layoutReady) return;
   if (!force && layoutInputKey() === layoutInputs) return;
+  // A new layout invalidates both the menu position and the saved video geometry.
+  closePresetMenu();
   if (videoHost.hidden) {
     layoutEl.className = "layout is-side no-video";
     layoutInputs = layoutInputKey();
@@ -1871,6 +2212,10 @@ function arrangeLayout() {
   const layout = (panelOverride ? panelOverride === "compact" : autoCompact) ? compact : full;
   currentLayout = layout;
   applyLayoutClass(layout);
+  presetBar.classList.remove("is-filtered");
+  if (layout.compact && presetsAvailable() && presetBar.scrollWidth > presetBar.clientWidth) {
+    presetBar.classList.add("is-filtered");
+  }
 
   // Width the video cannot use widens the full side panel, up to a limit, instead of
   // leaving bars between the panel and the video. Below the video the panel keeps
@@ -2543,6 +2888,7 @@ async function withBusy(fn) {
     setBusy(false);
     if (closeRequested) {
       await terminateCurrent("Stopped.");
+      await pendingParamsWrite.catch(() => {});
       await Neutralino.app.exit();
     }
   }
@@ -2788,6 +3134,10 @@ cameraSpeed.addEventListener("pointerup", () => cameraSpeed.blur());
 previewCaching.addEventListener("change", handlePreviewCachingChange);
 bufferApplyBtn.addEventListener("click", () => restartPreview().catch(() => {}));
 window.addEventListener("keydown", handleKeyDown);
+window.addEventListener("pointerdown", handleWindowPointerDown);
+panel.addEventListener("scroll", closePresetMenu);
+window.addEventListener("blur", closePresetMenu);
+window.addEventListener("resize", closePresetMenu);
 
 init().catch(async (err) => {
   await showError(normalizeError(err));

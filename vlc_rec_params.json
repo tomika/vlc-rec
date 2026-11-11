@@ -1,8 +1,10 @@
 {
   "ip_address": "192.168.50.181:5000",
   "output_path": "",
-  "output_filename": "2026-07-23.mkv",
+  "output_filename": "2026-11-08.mkv",
   "bash_path": "bash",
   "scan_concurrency": 25,
-  "scan_timeout_ms": 300
+  "scan_timeout_ms": 300,
+  "auto_reconnect": false,
+  "stall_timeout_sec": 15
 }

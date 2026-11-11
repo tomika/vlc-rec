@@ -2,7 +2,7 @@
 
 The app can control the camera that produces the SRT stream: turn it by clicking the picture, zoom, and open the camera's own control page. The app knows nothing about any camera. It talks to an **adapter**, a small separate program written for one camera model (or one protocol: OSC, VISCA, HTTP, ...), through a fixed interface. Anyone can write an adapter for their own camera and drop it into a folder; the app does not change.
 
-**Status.** Interface version 1 is implemented: discovery by manifest, the JSON Lines protocol, the `hello`/`connect` handshake with capabilities, click to centre, small turns (arrow keys), turning speed, relative zoom, and the camera's web page. The app draws only the controls that the capabilities declare. The first adapter is `plugins/obsbot-tail2/` (OBSBOT Tail 2 over its OSC interface). Sections marked **Planned** are the designed rest of the interface (continuous drive, absolute moves, focus, presets, image settings, actions such as formatting the SD card) and are not built; an adapter and the app ignore what they do not know, so they can be added without breaking version 1.
+**Status.** Interface version 1 is implemented: discovery by manifest, the JSON Lines protocol, the `hello`/`connect` handshake with capabilities, click to centre, small turns (arrow keys), turning speed, relative zoom, absolute moves with presets 1 to 9 kept by the app, and the camera's web page. The app draws only the controls that the capabilities declare. The first adapter is `plugins/obsbot-tail2/` (OBSBOT Tail 2 over its OSC interface). Sections marked **Planned** are the designed rest of the interface (continuous drive, focus, presets kept in the camera, image settings, actions such as formatting the SD card) and are not built; an adapter and the app ignore what they do not know, so they can be added without breaking version 1.
 
 ## Goals and non-goals
 
@@ -83,7 +83,8 @@ Adapters are never downloaded by the app. Installing one means copying a folder,
   "camera_config": { "host": "192.168.1.50" },
   "camera_turn_speed": 10,
   "camera_zoom_step": 10,
-  "camera_arrow_step_deg": 2
+  "camera_arrow_step_deg": 2,
+  "camera_presets": { "1": { "pan": -20, "tilt": 5, "zoom": 0.5 } }
 }
 ```
 
@@ -92,6 +93,7 @@ Adapters are never downloaded by the app. Installing one means copying a folder,
 - `camera_turn_speed`: the speed of a turn after a click, in the unit of `ptz.speed` (degrees per second). The slider changes it.
 - `camera_zoom_step`: percent of the zoom range per button press; a wheel notch is half of that.
 - `camera_arrow_step_deg`: degrees per arrow key press.
+- `camera_presets`: the presets 1 to 9 that the app keeps, see [Presets](#presets).
 
 ## Wire protocol
 
@@ -164,9 +166,11 @@ All of `ptz.*` and `zoom.*` are optional: the adapter declares what it supports 
 | `ptz.centerOn` | `x`, `y` (0..1, origin top left of the visible picture), `aspect` (width / height) | `{}` | Turn the camera so that the clicked point ends up in the middle. Needs `ptz.centerOn`. See [Click to centre](#click-to-centre). Outcome in `event turned`. |
 | `ptz.nudge` | `pan`, `tilt` (degrees, right and up positive) | `{}` | A small turn by this much, meant for key repeat: it builds on the last target while that is recent, so it neither waits for a readout nor lets the readout jitter in. Needs `ptz.nudge`. Outcome in `event nudged`. |
 | `ptz.setSpeed` | `value` | `{}` | The speed of `ptz.centerOn`, in the unit and range of `ptz.speed`. The app sends its saved speed after `connect`. |
-| `ptz.get` | none | `{pan, tilt}` | Degrees. |
+| `ptz.get` | none | `{pan, tilt}` | Degrees. While a turn that was asked for is still running, the position it is going to, not the one on the way: a preset taught right after a click is the point of the click. Needs `ptz.absolute`. |
 | `zoom.by` | `delta` (-1..1) | `{}` | Zoom in (positive) or out by this fraction of the range, clamped to the range. Builds on the last target while a previous zoom is still running. Needs `zoom.by`. Outcome in `event zoom`. |
-| `zoom.get` | none | `{value}` | 0..1. |
+| `zoom.get` | none | `{value}` | 0..1. While a zoom that was asked for is still running, the target. Needs `zoom.absolute`. |
+| `ptz.moveTo` | `pan`, `tilt` (degrees, right and up positive) | `{}` | An absolute turn at the speed of `ptz.centerOn` (`ptz.setSpeed`). Needs `ptz.absolute`, which also means that `ptz.get` works. Outcome in `event turned`. |
+| `zoom.set` | `value` (0..1) | `{}` | An absolute zoom, clamped to the range. Needs `zoom.absolute`, which also means that `zoom.get` works. Outcome in `event zoom`. |
 
 ## Capabilities
 
@@ -175,10 +179,10 @@ The result of `connect`, and re-sent as `event capabilities` when something chan
 ```json
 {
   "device": { "model": "OBSBOT Tail 2", "address": "192.168.1.50" },
-  "ptz": { "centerOn": "estimated", "nudge": true,
+  "ptz": { "centerOn": "estimated", "nudge": true, "absolute": true,
            "speed": { "min": 1, "max": 90, "default": 10, "unit": "deg/s" },
            "pan": { "min": -159, "max": 159 }, "tilt": { "min": -62, "max": 62 } },
-  "zoom": { "by": true },
+  "zoom": { "by": true, "absolute": true },
   "webPage": { "url": "http://192.168.1.50/" }
 }
 ```
@@ -188,11 +192,13 @@ The result of `connect`, and re-sent as `event capabilities` when something chan
 | `device.model`, `device.address` | Shown in the camera block of the drawer. |
 | `ptz.centerOn` | `"native"` (the camera does it) or `"estimated"` (computed from the optics): a click on the picture turns the camera. |
 | `ptz.nudge` | The arrow keys turn the camera. |
+| `ptz.absolute` | `ptz.get` and `ptz.moveTo` work: position presets. |
+| `zoom.absolute` | `zoom.get` and `zoom.set` work: zoom presets. |
 | `ptz.speed` | The turning speed slider, with `min` and `max`. |
 | `zoom.by` | The `-` and `+` buttons and the mouse wheel zoom the camera. |
 | `webPage.url` | The **Open web page** button opens it in the system's web browser (a plain `http` or `https` address only). |
 
-The bar below the video (zoom buttons, speed slider) is drawn when `zoom.by` or `ptz.speed` is declared. The drawer's camera block shows what the camera is, the web page button, and a hint that lists the controls that exist.
+The bar below the video (zoom buttons, speed slider) is drawn when `zoom.by` or `ptz.speed` is declared. The preset buttons exist when `ptz.absolute` or `zoom.absolute` is. The drawer's camera block shows what the camera is, the web page button, and a hint that lists the controls that exist.
 
 ## Events (version 1)
 
@@ -210,6 +216,15 @@ Events report what happened, whoever asked for it. The response to a request onl
 | `stopped` | The adapter is about to exit. |
 
 **Planned:** `position {pan?, tilt?, zoom?, focus?}` when the camera reports movement, `props {values}`, `progress {action, fraction?, message?}` and `log {level, message}`.
+
+## Presets
+
+The presets belong to the app, not to the camera. A preset is a position (pan and tilt, degrees) and/or a zoom (0..1 of the range), kept in `camera_presets` of the settings file, and applying one is an absolute move: `ptz.moveTo` and/or `zoom.set`. So every adapter that declares `ptz.absolute` and `zoom.absolute` (and answers `ptz.get` and `zoom.get` with where the camera is, or is going) gets nine presets without a memory in the camera.
+
+- **Keys.** `1` to `9` apply the preset. `Alt+<number>` teaches it from the camera as it is now: position and zoom, as far as the camera can. `Alt+Shift+<number>` teaches the position only, so that applying it only turns. `Alt+Ctrl+<number>` teaches the zoom only, so that applying it only zooms. `Alt+Ctrl+Shift+<number>` deletes it. Teaching replaces the preset whole. The digit is taken from the physical key (`KeyboardEvent.code`, also the keypad), because with Alt+Ctrl (AltGr on many layouts) the character is not the digit. Keys typed into a field, and keys while a dialog is open, are not taken.
+- **Preset 0 is fixed.** It is the wide shot: pan and tilt 0, the camera straight ahead, and zoom 0, fully out. It is not in the settings and nothing teaches, changes or deletes it (`Alt+0` in any form says that it is fixed, and its menu has only Apply). It uses the same moves as the others, so a camera that can only turn or only zoom does what it can.
+- **Buttons.** Ten buttons, 1 to 9 and then 0 as on the keyboard, in a row. Gray: empty. Blue: a position. Amber: a zoom. Half blue and half amber: both. A click applies the preset; a right click opens a menu with Apply, Teach (position and zoom, position only, zoom only) and Delete, with the keys written next to them. The row is in the bar below the video when the window is at least 900 px wide; otherwise, and beside the video, it is in the drawer. The menu hides the video while it is open over it (a page cannot draw over the native video window).
+- **What is stored.** `{ "pan": -20, "tilt": 5, "zoom": 0.5 }`, or only the pan and tilt, or only the zoom. The presets belong to the camera in use: they are not tied to an address, so another camera needs its own. Sensible values only are read back (pan and tilt within 360 degrees, zoom 0..1).
 
 ## Click to centre
 
@@ -277,10 +292,8 @@ None of this exists in the app or in the Tail 2 adapter yet. It is the design th
 |---|---|---|
 | `ptz.move` | `pan`, `tilt` (-1..1), `ttl_ms?` | Continuous velocity; the adapter maps it to the camera's own speed scale. `ttl_ms`: the adapter stops the motion by itself if no new `ptz.move` arrives in time, so a lost stop message cannot leave the camera running. The app sends a heartbeat while a button is held. Default 1000. |
 | `ptz.stop` | none | Same as `ptz.move` with 0, 0. |
-| `ptz.moveTo` | `pan`, `tilt` (degrees), `speed?` | Absolute. |
 | `ptz.home` | none | Back to the home position. |
 | `zoom.move` | `speed` (-1..1), `ttl_ms?` | Continuous, positive is tele. 0 stops. |
-| `zoom.set` | `value` (0..1), `speed?` | Absolute. |
 
 An app side pad would start `ptz.move` on pointer down, send a heartbeat at a third of `ttl_ms`, and `ptz.stop` on pointer up, leave or window blur.
 
@@ -293,9 +306,9 @@ An app side pad would start `ptz.move` on pointer down, send a heartbeat at a th
 | `focus.set` | `value` (0..1) | Absolute, manual mode only. |
 | `focus.get` | none | Returns `{mode, value}`. |
 
-### Presets: `preset`
+### Presets in the camera: `preset`
 
-`preset.save {index}`, `preset.recall {index}`, `preset.clear {index}`. `capabilities.presets.count` tells how many exist; optional `labels` for named presets.
+`preset.save {index}`, `preset.recall {index}`, `preset.clear {index}`. `capabilities.presets.count` tells how many exist; optional `labels` for named presets. These are for cameras that have a memory of their own; the presets 1 to 9 that the app has today are its own (see [Presets](#presets)) and need no such memory.
 
 ### Image settings: `props`
 

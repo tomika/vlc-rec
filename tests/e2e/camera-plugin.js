@@ -78,6 +78,20 @@ const run3 = [
   request("shutdown", {})
 ];
 
+// Absolute moves, for presets: what ptz.get and zoom.get answer is where the camera is going, too.
+const run4 = [
+  request("connect", { config: { host: "127.0.0.1" } }),
+  request("ptz.moveTo", { pan: -20, tilt: 10 }),
+  request("ptz.get", {}),
+  request("ptz.moveTo", { pan: 400, tilt: 0 }),
+  request("zoom.set", { value: 0.5 }),
+  request("zoom.get", {}),
+  request("zoom.set", { value: 1.5 }),
+  request("ptz.moveTo", { pan: 0, tilt: 0 }),
+  request("zoom.set", { value: 0 }),
+  request("shutdown", {})
+];
+
 const lines = (requests) => requests.map((r, i) => JSON.stringify({ id: i + 1, ...r }));
 const feed = (requests, pause) => `( ${lines(requests).map((l) => `sleep ${pause}; echo '${l}'`).join("; ")}; sleep 0.5 )`;
 
@@ -87,12 +101,15 @@ const script = [
   `${feed(run1, 0.4)} | ${PLUGIN} > /tmp/plugin1.out 2>&1`,
   `${feed(run2, 0.4)} | ${PLUGIN} > /tmp/plugin2.out 2>&1`,
   `${feed(run3, 0.2)} | ${PLUGIN} > /tmp/plugin3.out 2>&1`,
-  "echo '=====FAKE====='; cat /tmp/fake.log; echo '=====PLUGIN1====='; cat /tmp/plugin1.out; echo '=====PLUGIN2====='; cat /tmp/plugin2.out; echo '=====PLUGIN3====='; cat /tmp/plugin3.out"
+  `${feed(run4, 0.4)} | ${PLUGIN} > /tmp/plugin4.out 2>&1`,
+  "echo '=====FAKE====='; cat /tmp/fake.log; echo '=====PLUGIN1====='; cat /tmp/plugin1.out; echo '=====PLUGIN2====='; cat /tmp/plugin2.out; echo '=====PLUGIN3====='; cat /tmp/plugin3.out; echo '=====PLUGIN4====='; cat /tmp/plugin4.out"
 ].join("\n");
 
 const result = spawnSync(tool, ["run", "--rm", "--network", "none", "-v", `${repo}:/repo:ro`, IMAGE, "bash", "-c", script],
   { encoding: "utf8" });
-const out = result.stdout + result.stderr;
+if (result.error) throw result.error;
+const out = (result.stdout || "") + (result.stderr || "");
+assert.equal(result.status, 0, `${tool} failed:\n${out}`);
 if (process.env.SHOW) console.log(out);
 const section = (name, next) => {
   const start = out.indexOf(`=====${name}=====`);
@@ -104,7 +121,8 @@ const parse = (text) => text.trim().split("\n").filter(Boolean).map((line) => JS
 const fakeLog = section("FAKE", "PLUGIN1").split("\n").filter((l) => l.startsWith("recv "));
 const messages1 = parse(section("PLUGIN1", "PLUGIN2"));
 const messages2 = parse(section("PLUGIN2", "PLUGIN3"));
-const messages3 = parse(section("PLUGIN3"));
+const messages3 = parse(section("PLUGIN3", "PLUGIN4"));
+const messages4 = parse(section("PLUGIN4"));
 const near = (actual, wanted, what) => assert.ok(Math.abs(actual - wanted) <= 1, `${what}: ${actual}, expected ${wanted}`);
 const names = fakeLog.map((l) => l.split(" ")[1].split("/").pop());
 const events = (messages, name) => messages.filter((m) => m.event === name);
@@ -117,8 +135,10 @@ assert.equal(caps.device.model, "OBSBOT Tail 2");
 assert.equal(caps.device.address, "127.0.0.1");
 assert.equal(caps.ptz.centerOn, "estimated");
 assert.equal(caps.ptz.nudge, true);
+assert.equal(caps.ptz.absolute, true, "ptz.get and ptz.moveTo");
+assert.equal(caps.zoom.absolute, true, "zoom.get and zoom.set");
 assert.deepEqual(caps.ptz.speed, { min: 1, max: 90, default: 10, unit: "deg/s" });
-assert.deepEqual(caps.zoom, { by: true });
+assert.deepEqual(caps.zoom, { by: true, absolute: true });
 assert.equal(caps.webPage.url, "http://127.0.0.1/");
 assert.deepEqual(events(messages1, "state")[0], { event: "state", state: "connected" });
 assert.deepEqual(response(messages1, 4).result, { pan: 0, tilt: 0 });
@@ -170,7 +190,7 @@ assert.deepEqual(events(messages1, "zoom").map((e) => [e.from, e.to]), [[0, 0.1]
 
 // No readout between a move command and a nudge, none between two zoom commands.
 const turnIdx = names.map((n, i) => (n === "SetGimMotorDegree" ? i : -1)).filter((i) => i >= 0);
-assert.equal(turnIdx.length, 9, "first run: four turns that moved, two nudges, none for the middle; second run: two turns and a nudge");
+assert.equal(turnIdx.length, 11, "first run: four turns that moved, two nudges, none for the middle; second run: two turns and a nudge; fourth run: two absolute turns");
 const between = (a, b, name) => names.slice(a + 1, b).includes(name);
 // turnIdx: right, top, pitched, nudge, nudge back, zoomed.
 assert.ok(!between(turnIdx[2], turnIdx[3], "GetGimbalPosInfo"), "the nudge builds on the target, not a readout");
@@ -184,13 +204,28 @@ assert.equal(refused.error.code, "invalid_params", "out of range ptz.centerOn is
 const turnLines = fakeLog.filter((l) => l.includes("SetGimMotorDegree"));
 assert.ok(turnLines.slice(0, 6).every((l) => l.includes(`[${SPEED}, `)), "the speed is passed on, for turns and nudges alike");
 // Second run: default speed 10 for ptz.centerOn, 5 after ptz.setSpeed 5, and ptz.nudge keeps its own 30.
-assert.deepEqual(turnLines.slice(6).map((l) => JSON.parse(l.replace(/^.*SetGimMotorDegree /, ""))[0]), [10, 5, 30]);
+assert.deepEqual(turnLines.slice(6, 9).map((l) => JSON.parse(l.replace(/^.*SetGimMotorDegree /, ""))[0]), [10, 5, 30]);
 // The default zoom range ends at 36: asking for more does not plan beyond it.
 assert.deepEqual(events(messages2, "zoom").map((e) => [e.from, e.to]), [[0, 1], [1, 1], [1, 0]]);
 assert.deepEqual(events(messages2, "speed"), [{ event: "speed", value: 5 }]);
 assert.equal(response(messages2, 9).error.code, "invalid_params", "ptz.setSpeed 0 is refused");
 assert.equal(response(messages2, 10).result && Object.keys(response(messages2, 10).result).length, 0, "shutdown is answered");
 assert.equal(messages2.at(-1).event, "stopped");
+
+// ---- absolute moves: the numbers go to the camera with the signs turned round ----
+const moved = events(messages4, "turned");
+assert.equal(moved.length, 2);
+// The fake camera is where the earlier runs left it; the speed is the default 10 degrees per second.
+assert.deepEqual([moved[0].moved, moved[0].toPan, moved[0].toTilt], [true, -20, 10]);
+assert.equal(moved[0].durationMs, Math.max(Math.abs(-20 - moved[0].fromPan), Math.abs(10 - moved[0].fromTilt)) * 100);
+assert.deepEqual(response(messages4, 3).result, { pan: -20, tilt: 10 }, "ptz.get answers with the target while the camera is on its way");
+assert.equal(response(messages4, 4).error.code, "invalid_params", "a pan of 400 degrees");
+assert.deepEqual(events(messages4, "zoom").map((e) => [e.from, e.to]), [[0, 0.5], [0.5, 0]]);
+assert.deepEqual(response(messages4, 6).result, { value: 0.5 }, "zoom.get answers with the target too");
+assert.equal(response(messages4, 7).error.code, "invalid_params", "a zoom of 1.5");
+assert.deepEqual(turnLines.slice(9).map((l) => JSON.parse(l.replace(/^.*SetGimMotorDegree /, ""))), [[10, 20, -10], [10, 0, 0]],
+  "right and up positive in the interface, the other way for the camera");
+assert.ok(fakeLog.some((l) => /SetZoom \[18\]/.test(l)), "half of the range 36 is 18 units");
 
 // ---- refusals ----
 assert.equal(response(messages3, 1).error.code, "not_connected", "nothing works before connect");

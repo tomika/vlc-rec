@@ -2,7 +2,7 @@
  * Minimal libVLC stand-in for testing vlc-rec-player without VLC. It exports what
  * the player loads, reports a growing byte counter, and when the media has a
  * :sout option it appends to the dst="..." file like a real recording would.
- * native/build.sh builds it into tests/fixtures/stub/.
+ * native/build-test-stubs.sh builds it into tests/fixtures/stub/.
  */
 #include <stdio.h>
 #include <stdlib.h>

@@ -12,6 +12,8 @@
  *   {"id":4,"method":"ptz.nudge","params":{"pan":2,"tilt":0}}
  *   {"id":5,"method":"ptz.setSpeed","params":{"value":10}}
  *   {"id":6,"method":"zoom.by","params":{"delta":0.1}}
+ *   {"id":7,"method":"ptz.moveTo","params":{"pan":-20,"tilt":5}}
+ *   {"id":8,"method":"zoom.set","params":{"value":0.5}}
  *   ptz.get, zoom.get, shutdown
  * Every request gets one response line, {"id":N,"result":{...}} or
  * {"id":N,"error":{"code":"...","message":"..."}}. Events are lines with "event" and no id:
@@ -71,6 +73,7 @@ typedef int sock_t;
 #define REPLY_WAIT_MS 400
 #define ZOOM_TARGET_KEEP_MS 3000
 #define POSE_KEEP_MS 1500
+#define TURN_START_MS 400
 #define MAX_SPEED 90
 
 static sock_t g_sock = INVALID_SOCKET;
@@ -90,6 +93,9 @@ static long long g_zoom_target_at = 0;
 static int g_pose_valid = 0;
 static int g_pose_tilt = 0, g_pose_pan = 0;
 static long long g_pose_at = 0;
+/* The camera needs time to get there; until then a readout shows a point on the way, so ptz.get
+ * answers with the target. */
+static long long g_pose_until = 0;
 
 /* Why the last operation failed: a code of the interface and a message for the user. */
 static const char *g_err_code = "internal";
@@ -499,12 +505,34 @@ static int clamp_int(double v, int lo, int hi)
 
 static double zoom_fraction(int units) { return (double)units / g_zoom_max; }
 
-static void note_pose(int tilt, int pan)
+/* The turn starts a moment after the command and takes duration_ms. */
+static void note_pose(int tilt, int pan, long long duration_ms)
 {
     g_pose_valid = 1;
     g_pose_tilt = tilt;
     g_pose_pan = pan;
     g_pose_at = now_ms();
+    g_pose_until = g_pose_at + TURN_START_MS + duration_ms;
+}
+
+/* A new target can be issued before the old one is reached. The distance from the old target to
+ * the new one is only part of the remaining travel, so retain the previous time as an upper bound. */
+static long long remaining_pose_ms(void)
+{
+    long long remaining = g_pose_until - now_ms();
+    return g_pose_valid && remaining > 0 ? remaining : 0;
+}
+
+/* The position the camera has or is turning to, as the camera counts: the target while it is on its
+ * way, else a readout. */
+static int current_pose(int *tilt, int *pan)
+{
+    if (g_pose_valid && now_ms() < g_pose_until) {
+        *tilt = g_pose_tilt;
+        *pan = g_pose_pan;
+        return 1;
+    }
+    return read_gimbal(tilt, pan);
 }
 
 /* ---- operations ----
@@ -529,12 +557,40 @@ static int do_center(double x, double y, double aspect)
         if (osc_send("/OBSBOT/WebCam/General/SetGimMotorDegree", args, 3) != 0)
             return fail("device_error", "The turn command could not be sent.");
     }
-    note_pose(tt, tp);
+    if (moved || !g_pose_valid || now_ms() >= g_pose_until) note_pose(tt, tp, duration);
     char line[320];
     snprintf(line, sizeof line,
              "{\"event\":\"turned\",\"moved\":%s,\"fromPan\":%d,\"fromTilt\":%d,\"toPan\":%d,\"toTilt\":%d,\"zoom\":%.4f,"
              "\"durationMs\":%lld}",
              moved ? "true" : "false", -pan, -tilt, -tp, -tt, zoom_fraction(zoom), duration);
+    emit(line);
+    return 1;
+}
+
+/* An absolute turn, degrees with right and up positive, at the speed of ptz.centerOn. */
+static int do_move_to(double pan, double tilt)
+{
+    if (!(fabs(pan) <= 360 && fabs(tilt) <= 360)) return fail("invalid_params", "ptz.moveTo needs a pan and a tilt in degrees.");
+    int cur_tilt = 0, cur_pan = 0, zoom = 0;
+    if (!read_zoom(&zoom)) zoom = g_zoom_target >= 0 ? g_zoom_target : 0;
+    if (!current_pose(&cur_tilt, &cur_pan)) return fail("timeout", "The camera did not report its position.");
+    int tp = clamp_int(-pan, -PAN_LIMIT, PAN_LIMIT);
+    int tt = clamp_int(-tilt, -TILT_LIMIT, TILT_LIMIT);
+    int moved = (tp != cur_pan || tt != cur_tilt);
+    int longest = abs(tp - cur_pan) > abs(tt - cur_tilt) ? abs(tp - cur_pan) : abs(tt - cur_tilt);
+    long long duration = moved ? (long long)longest * 1000 / g_speed : 0;
+    if (moved) duration += remaining_pose_ms();
+    if (moved) {
+        int args[3] = {g_speed, tp, tt};
+        if (osc_send("/OBSBOT/WebCam/General/SetGimMotorDegree", args, 3) != 0)
+            return fail("device_error", "The turn command could not be sent.");
+    }
+    if (moved || !g_pose_valid || now_ms() >= g_pose_until) note_pose(tt, tp, duration);
+    char line[320];
+    snprintf(line, sizeof line,
+             "{\"event\":\"turned\",\"moved\":%s,\"fromPan\":%d,\"fromTilt\":%d,\"toPan\":%d,\"toTilt\":%d,\"zoom\":%.4f,"
+             "\"durationMs\":%lld}",
+             moved ? "true" : "false", -cur_pan, -cur_tilt, -tp, -tt, zoom_fraction(zoom), duration);
     emit(line);
     return 1;
 }
@@ -559,7 +615,13 @@ static int do_nudge(double dx, double dy)
         if (osc_send("/OBSBOT/WebCam/General/SetGimMotorDegree", args, 3) != 0)
             return fail("device_error", "The turn command could not be sent.");
     }
-    note_pose(tt, tp);
+    int longest_nudge = abs(tp - pan) > abs(tt - tilt) ? abs(tp - pan) : abs(tt - tilt);
+    if (longest_nudge) {
+        long long duration = (long long)longest_nudge * 1000 / g_nudge_speed + remaining_pose_ms();
+        note_pose(tt, tp, duration);
+    } else if (!g_pose_valid || now_ms() >= g_pose_until) {
+        note_pose(tt, tp, 0);
+    }
     char line[128];
     snprintf(line, sizeof line, "{\"event\":\"nudged\",\"toPan\":%d,\"toTilt\":%d}", -tp, -tt);
     emit(line);
@@ -579,6 +641,25 @@ static int do_zoom_by(double delta)
     int target = base + units;
     if (target < 0) target = 0;
     if (target > g_zoom_max) target = g_zoom_max;
+    if (target != base && osc_send("/OBSBOT/WebCam/General/SetZoom", &target, 1) != 0)
+        return fail("device_error", "The zoom command could not be sent.");
+    g_zoom_target = target;
+    g_zoom_target_at = now;
+    char line[128];
+    snprintf(line, sizeof line, "{\"event\":\"zoom\",\"from\":%.4f,\"to\":%.4f}", zoom_fraction(base), zoom_fraction(target));
+    emit(line);
+    return 1;
+}
+
+/* value: 0..1 of the zoom range. */
+static int do_zoom_set(double value)
+{
+    if (!(value >= 0 && value <= 1)) return fail("invalid_params", "zoom.set needs a value from 0 to 1.");
+    int target = (int)lround(value * g_zoom_max);
+    int base = 0;
+    long long now = now_ms();
+    if (g_zoom_target >= 0 && now - g_zoom_target_at < ZOOM_TARGET_KEEP_MS) base = g_zoom_target;
+    else if (!read_zoom(&base)) return fail("timeout", "The camera did not report its zoom.");
     if (target != base && osc_send("/OBSBOT/WebCam/General/SetZoom", &target, 1) != 0)
         return fail("device_error", "The zoom command could not be sent.");
     g_zoom_target = target;
@@ -678,10 +759,10 @@ static int do_connect(int config, char *capabilities, size_t cap)
     g_connected = 1;
     snprintf(capabilities, cap,
              "{\"capabilities\":{\"device\":{\"model\":\"OBSBOT Tail 2\",\"address\":\"%s\"},"
-             "\"ptz\":{\"centerOn\":\"estimated\",\"nudge\":true,"
+             "\"ptz\":{\"centerOn\":\"estimated\",\"nudge\":true,\"absolute\":true,"
              "\"speed\":{\"min\":1,\"max\":%d,\"default\":10,\"unit\":\"deg/s\"},"
              "\"pan\":{\"min\":%d,\"max\":%d},\"tilt\":{\"min\":%d,\"max\":%d}},"
-             "\"zoom\":{\"by\":true},"
+             "\"zoom\":{\"by\":true,\"absolute\":true},"
              "\"webPage\":{\"url\":\"http://%s/\"}}}",
              g_host, MAX_SPEED, -PAN_LIMIT, PAN_LIMIT, -TILT_LIMIT, TILT_LIMIT, g_host);
     return 1;
@@ -690,7 +771,7 @@ static int do_connect(int config, char *capabilities, size_t cap)
 /* ---- requests ---- */
 static int is_device_method(const char *method)
 {
-    static const char *const known[] = {"ptz.centerOn", "ptz.nudge", "ptz.setSpeed", "ptz.get", "zoom.by", "zoom.get"};
+    static const char *const known[] = {"ptz.centerOn", "ptz.nudge", "ptz.setSpeed", "ptz.get", "zoom.by", "zoom.get", "ptz.moveTo", "zoom.set"};
     for (size_t i = 0; i < sizeof known / sizeof known[0]; i++) {
         if (strcmp(method, known[i]) == 0) return 1;
     }
@@ -743,13 +824,18 @@ static int handle_request(char *line)
         ok = do_set_speed(jnumber(jfield(params, "value"), 0));
     } else if (strcmp(method, "zoom.by") == 0) {
         ok = do_zoom_by(jnumber(jfield(params, "delta"), 0));
+    } else if (strcmp(method, "ptz.moveTo") == 0) {
+        ok = do_move_to(jnumber(jfield(params, "pan"), 1000), jnumber(jfield(params, "tilt"), 1000));
+    } else if (strcmp(method, "zoom.set") == 0) {
+        ok = do_zoom_set(jnumber(jfield(params, "value"), -1));
     } else if (strcmp(method, "ptz.get") == 0) {
         int tilt = 0, pan = 0;
-        ok = read_gimbal(&tilt, &pan) ? 1 : fail("timeout", "The camera did not report its position.");
+        ok = current_pose(&tilt, &pan) ? 1 : fail("timeout", "The camera did not report its position.");
         if (ok) snprintf(result, sizeof result, "{\"pan\":%d,\"tilt\":%d}", -pan, -tilt);
     } else if (strcmp(method, "zoom.get") == 0) {
         int units = 0;
-        ok = read_zoom(&units) ? 1 : fail("timeout", "The camera did not report its zoom.");
+        if (g_zoom_target >= 0 && now_ms() - g_zoom_target_at < ZOOM_TARGET_KEEP_MS) ok = (units = g_zoom_target, 1);
+        else ok = read_zoom(&units) ? 1 : fail("timeout", "The camera did not report its zoom.");
         if (ok) snprintf(result, sizeof result, "{\"value\":%.4f}", zoom_fraction(units));
     } else {
         ok = fail("unsupported", "The adapter has no such method.");

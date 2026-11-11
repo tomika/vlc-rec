@@ -44,6 +44,7 @@ Off until a camera adapter is chosen in `vlc_rec_params.json`, for example `"cam
 - **Mouse wheel** over the preview, or the `-` and `+` buttons of the camera controls: zoom out and in. A button press is `camera_zoom_step` percent of the zoom range, a wheel notch half of that.
 - **Camera web page**: with a camera address set, the drawer has an **Open web page** button that opens `http://CAMERA/` in the system's web browser, where the camera's own control page lets you, for example, format the SD card. (The page can be framed, but the native video window would cover an in-app frame, and the system browser does not depend on how the page was written.)
 - **Arrow keys** (when no text field has the focus): pan and tilt by `camera_arrow_step_deg` degrees per press and per key repeat; Shift makes the step five times larger.
+- **Presets 1 to 9** (for a camera whose adapter can report and take its position, which `obsbot-tail2` can): the number keys apply a preset, and `Alt+<number>` teaches it from the camera as it is (position and zoom), `Alt+Shift+<number>` only the position, `Alt+Ctrl+<number>` only the zoom, `Alt+Ctrl+Shift+<number>` deletes it. A preset that holds a position only turns the camera, a zoom preset only zooms. The key `0` is a fixed preset that cannot be taught, changed or deleted: the whole scene, the camera straight ahead (pan and tilt 0) and zoomed out fully (`Alt+0` only says so). With settings open, the buttons are always in the settings drawer. With settings closed, they share one line with the controls. If space is tight, empty slots are hidden; taught slots and the fixed 0 stay available, scrolling horizontally if needed. Gray is an empty preset, blue a position, amber a zoom, half and half both. A click on a button applies the preset. In the settings drawer, a right click opens a menu for teaching and deleting; the menu stays inside the drawer. The presets are kept in `camera_presets` of the settings file and belong to the camera in use.
 
 Settings in `vlc_rec_params.json`:
 
@@ -53,6 +54,7 @@ Settings in `vlc_rec_params.json`:
 - `preview_caching_ms`: network cache of the player in ms, also the **Preview buffer** field of the drawer (default `500`; the field takes 0 to 10000, the file anything from 0; `-1` leaves VLC's own 1000). It applies when a preview or recording is **started**: the player takes it as an argument. While a running one has another value than the field, a note under the field says so, and for a preview a button restarts it with the new value (a recording is not cut; it takes the value at its next start or reconnect). VLC's default delays the picture by about a second. Too small a cache **freezes the picture**, and how small is too small depends on the network and the computer, so nothing is forced: the hint under the field says to lower it until the picture stutters and raise it a little. With the 4K stream of a Tail 2 over a LAN in a container, software decoding and a real window, 150 ms froze it, 250 ms and more moved (without a window 150 ms lost about 40 percent of the pictures, 300 ms about 10, 500 ms none). A smaller stream would allow less.
 - `camera_zoom_step`: percent of the zoom range per button press (default `10`); a wheel notch is half of that.
 - `camera_arrow_step_deg`: degrees per arrow key press (default `2`, whole degrees).
+- `camera_presets`: the presets, `{ "1": { "pan": -20, "tilt": 5, "zoom": 0.5 } }` (pan and tilt in degrees, right and up positive; zoom 0 to 1 of the camera's range); written by the app when a preset is taught or deleted.
 
 Notes from measuring a Tail 2: the position the camera reports is accurate to about 1 degree, which is also the accuracy of a turn; pan and tilt cannot be driven together by speed (the camera acts on the last direction command only), so every move here is a turn to an absolute angle. With the real camera, a click turned the clicked point to the middle within a few percent of the picture width (`tools/camera/verify-centering.js`, which compares the picture before and after). Messages from the camera adapter (for example an unreachable camera) appear after the status text for a few seconds. Tested: the adapter against a fake camera and against a real Tail 2, and the whole chain (click, wheel, keys through a real window with real libVLC) in the Linux end-to-end test, on X11 with openbox and on sway with XWayland. Not tested: the same chain on Windows, and on real GNOME or KDE desktops.
 
@@ -70,7 +72,8 @@ npm start
 ## Build
 
 ```bash
-npm run build:player   # builds player/ (player, camera adapters in player/plugins) and the test stub in a container
+npm run build:player   # builds the players and camera adapters in player/ in a container
+npm run build:test-stubs # builds the libVLC test doubles needed for stub end-to-end tests
 npm run build
 ```
 

@@ -73,6 +73,8 @@
             <span id="cameraAddressText" class="camera-address"></span>
             <button id="cameraPageBtn" class="btn btn-blue btn-inline" type="button" title="Opens the camera's own control page in the web browser: there, for example, the SD card can be formatted.">Open web page</button>
           </div>
+          <!-- The camera presets while settings are open. -->
+          <div id="presetDrawer" class="preset-row" role="group" aria-label="Camera presets" hidden></div>
           <p id="cameraHint" class="drawer-hint"></p>
         </div>
       </section>
@@ -98,6 +100,9 @@
           </div>
         </div>
 
+        <!-- Camera presets while settings are closed. -->
+        <div id="presetBar" class="preset-row" role="group" aria-label="Camera presets" hidden></div>
+
         <div class="button-row">
           <button id="recordBtn" class="btn btn-blue" type="button">Record</button>
           <button id="previewBtn" class="btn btn-green" type="button">Preview</button>
@@ -120,6 +125,9 @@
       </div>
     </section>
   </div>
+
+  <!-- The menu of a preset button, built by app.js. -->
+  <div id="presetMenu" class="preset-menu" role="menu" aria-label="Preset" hidden></div>
 
   <div id="scanDialog" class="scan-dialog" role="dialog" aria-modal="true" aria-labelledby="scanTitle" hidden>
     <div class="scan-card">

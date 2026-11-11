@@ -402,6 +402,7 @@ body {
   gap: 8px;
 }
 
+.preset-row[hidden],
 .camera-item[hidden],
 .camera-bar[hidden] {
   display: none;
@@ -703,6 +704,210 @@ body {
 
 .layout.no-video .status {
   white-space: normal;
+}
+
+/* ---- camera presets ----
+   Gray: empty. Blue: a position (pan and tilt). Amber: a zoom. Both: half blue, half amber. Muted tones that
+   sit on the panel without shouting, apart enough for a glance, and not by colour alone: the tooltip says it too. */
+.preset-row {
+  display: flex;
+  flex-wrap: nowrap;
+  align-items: center;
+  gap: 4px;
+}
+
+.drawer .preset-row:not([hidden]) {
+  margin-top: 8px;
+}
+
+/* The drawer has the presets while settings are open; the bar has them while settings are closed. */
+.bar .preset-row {
+  display: none;
+}
+
+/* Compact controls share one line; trained presets stay accessible if the row needs to scroll. */
+.layout.is-compact .bar .preset-row:not([hidden]) {
+  display: flex;
+}
+
+.layout.is-stack.is-compact[data-presets="on"] .bar {
+  grid-template-columns: max-content minmax(0, 1fr) minmax(0, max-content) max-content max-content;
+  grid-template-areas: "info status presets camera buttons";
+  gap: 8px;
+}
+
+.layout.is-stack.is-compact[data-presets="on"][data-camera="off"] .bar {
+  grid-template-columns: max-content minmax(0, 1fr) minmax(0, max-content) max-content;
+  grid-template-areas: "info status presets buttons";
+}
+
+.layout.is-stack.is-compact[data-presets="on"] .bar .preset-row:not([hidden]) {
+  grid-area: presets;
+  grid-column: auto;
+  min-width: 0;
+  overflow-x: auto;
+}
+
+.layout.is-stack.is-compact .bar .preset-btn {
+  flex: 0 0 32px;
+  width: 32px;
+  min-width: 32px;
+}
+
+.layout.is-stack.is-compact .bar .preset-row.is-filtered .preset-btn:not(.is-position):not(.is-zoom):not(.is-both) {
+  display: none;
+}
+
+@media (min-width: 801px) and (max-width: 1100px) {
+  .layout.is-stack.is-compact[data-presets="on"] .button-row .btn:not(.btn-toggle) {
+    min-width: 80px;
+  }
+
+  .layout.is-stack.is-compact[data-presets="on"] .camera-item-speed input[type="range"] {
+    flex-basis: 70px;
+    width: 70px;
+  }
+}
+
+@media (max-width: 800px) {
+  .layout.is-stack.is-compact[data-presets="on"] .mode-badge {
+    font-size: 0;
+    padding: 4px;
+  }
+
+  .layout.is-stack.is-compact[data-presets="on"] .button-row .btn:not(.btn-toggle) {
+    min-width: 0;
+    width: 84px;
+    padding: 8px 4px;
+    font-size: 11px;
+  }
+
+  .layout.is-stack.is-compact[data-presets="on"] .camera-item-speed input[type="range"] {
+    flex-basis: 60px;
+    width: 60px;
+  }
+
+  .layout.is-stack.is-compact[data-presets="on"] .camera-bar .btn.btn-zoom {
+    width: 32px;
+  }
+}
+
+/* Nine in a line: 32 px at most, and narrower when the drawer is. */
+.preset-btn {
+  flex: 1 1 0;
+  min-width: 18px;
+  max-width: 32px;
+  height: 26px;
+  padding: 0;
+  border: 1px solid rgba(255, 255, 255, 0.2);
+  border-radius: 5px;
+  background: rgba(255, 255, 255, 0.07);
+  color: #aab6c2;
+  font: inherit;
+  font-size: 13px;
+  font-weight: 600;
+  line-height: 1;
+  cursor: pointer;
+}
+
+.preset-btn:hover {
+  background: rgba(255, 255, 255, 0.14);
+  color: var(--text);
+}
+
+.preset-btn:focus-visible {
+  outline: 2px solid #9fc4ea;
+  outline-offset: 1px;
+}
+
+.preset-btn.is-position,
+.preset-btn.is-zoom,
+.preset-btn.is-both {
+  border-color: rgba(255, 255, 255, 0.35);
+  color: #f4f7fa;
+  text-shadow: 0 1px 1px rgba(0, 0, 0, 0.45);
+}
+
+.preset-btn.is-position {
+  background: #3c6ea5;
+}
+
+.preset-btn.is-zoom {
+  background: #a67a2e;
+}
+
+.preset-btn.is-both {
+  background: linear-gradient(135deg, #3c6ea5 0 50%, #a67a2e 50% 100%);
+}
+
+/* The fixed preset 0: the wide shot. Both colours, a ring, and a little apart from 1 to 9. */
+.preset-btn.is-fixed {
+  margin-left: 6px;
+  box-shadow: inset 0 0 0 1px rgba(255, 255, 255, 0.6);
+}
+
+.preset-btn.is-position:hover,
+.preset-btn.is-zoom:hover,
+.preset-btn.is-both:hover {
+  filter: brightness(1.15);
+}
+
+/* The menu of a preset button: over the page, near the button. */
+.preset-menu {
+  position: fixed;
+  z-index: 40;
+  width: max-content;
+  padding: 4px;
+  display: flex;
+  flex-direction: column;
+  overflow: auto;
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  background: #263544;
+  box-shadow: 0 8px 24px rgba(0, 0, 0, 0.45);
+}
+
+.preset-menu[hidden] {
+  display: none;
+}
+
+.preset-menu-title {
+  flex: 0 0 auto;
+  padding: 4px 10px 6px;
+  color: var(--muted);
+  font-size: 12px;
+}
+
+.preset-menu-item {
+  display: flex;
+  flex: 0 0 auto;
+  justify-content: space-between;
+  gap: 24px;
+  padding: 6px 10px;
+  border: 0;
+  border-radius: 5px;
+  background: transparent;
+  color: var(--text);
+  font: inherit;
+  font-size: 13px;
+  text-align: left;
+  cursor: pointer;
+}
+
+.preset-menu-item:hover:not(:disabled),
+.preset-menu-item:focus-visible {
+  outline: none;
+  background: rgba(255, 255, 255, 0.12);
+}
+
+.preset-menu-item:disabled {
+  color: #7d8b98;
+  cursor: default;
+}
+
+.preset-menu-keys {
+  color: var(--muted);
+  font-size: 12px;
 }
 
 .scan-dialog {

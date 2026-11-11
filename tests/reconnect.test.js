@@ -25,16 +25,18 @@ function harness() {
   const opened = [];
   const logs = [];
   const env = new Map();
+  // An element of the page; one that app.js makes (createElement) has the same parts, but is not in the page.
+  const newElement = () => ({
+    value: "", checked: false, hidden: true, style: {}, dataset: {}, attributes: {}, children: [],
+    classList: { names: new Set(), add(name) { this.names.add(name); }, remove(name) { this.names.delete(name); } },
+    addEventListener(name, handler) { this[name] = handler; },
+    setAttribute(name, value) { this.attributes[name] = value; }, focus() {},
+    replaceChildren(...children) { this.children = children; },
+    blur() {},
+    getBoundingClientRect() { return { left: 10, top: 20, width: 640, height: 360, right: 650, bottom: 380 }; }
+  });
   const element = (id) => {
-    if (!elements.has(id)) elements.set(id, {
-      value: "", checked: false, hidden: true, style: {}, dataset: {}, attributes: {},
-      classList: { names: new Set(), add(name) { this.names.add(name); }, remove(name) { this.names.delete(name); } },
-      addEventListener(name, handler) { this[name] = handler; },
-      setAttribute(name, value) { this.attributes[name] = value; }, focus() {},
-      replaceChildren(...children) { this.children = children; },
-      blur() {},
-      getBoundingClientRect() { return { left: 10, top: 20, width: 640, height: 360 }; }
-    });
+    if (!elements.has(id)) elements.set(id, newElement());
     return elements.get(id);
   };
   const os = {
@@ -75,7 +77,7 @@ function harness() {
     async readFile(path) { return files.get(path); }
   };
   const context = createContext({
-    document: { getElementById: element, activeElement: null, createElement: () => ({}) },
+    document: { getElementById: element, activeElement: null, createElement: () => ({ ...newElement(), hidden: false }) },
     window: { addEventListener() {} },
     NL_PATH: "/app", NL_OS: "Windows", NL_ARCH: "x64", NL_PID: "4242",
     TextEncoder,
@@ -1235,6 +1237,7 @@ test("camera: the speed slider takes its range from the adapter, shows the confi
   slider.change();
   assert.deepEqual(speeds(), [30, 7]);
   assert.equal(h.run("parameters.camera_turn_speed"), 7);
+  await flush();
   assert.match(h.files.get("/app/vlc_rec_params.json"), /"camera_turn_speed": 7/, "the choice is saved");
 
   slider.value = "90";
@@ -1401,6 +1404,7 @@ test("the preview buffer field shows the buffer of the settings and saves a new 
   field.value = "800";
   field.change();
   assert.equal(h.run("parameters.preview_caching_ms"), 800);
+  await flush();
   assert.match(h.files.get("/app/vlc_rec_params.json"), /"preview_caching_ms": 800/, "saved");
 
   field.value = "60"; // a fast network can do with this: not raised
@@ -1574,4 +1578,396 @@ test("camera: settings of earlier builds become the config of the obsbot-tail2 a
   await current.run("loadParams()");
   assert.equal(current.run("parameters.camera_plugin"), "other");
   assert.equal(current.run("parameters.camera_zoom_step"), 4, "no camera_ip: the new format, nothing is converted");
+});
+
+// ---- camera presets ----
+
+const PRESET_CAPS = {
+  ...FULL_CAPS,
+  ptz: { ...FULL_CAPS.ptz, absolute: true },
+  zoom: { by: true, absolute: true }
+};
+
+// A key press with the modifiers named; `code` is the physical key, the character it makes is not the digit
+// (on a Hungarian keyboard Alt+Ctrl+1 types a tilde).
+function presetKey(h, code, modifiers = {}, extra = {}) {
+  const evt = { key: "~", code, target: { tagName: "BODY" }, altKey: false, ctrlKey: false, shiftKey: false, metaKey: false, ...modifiers, ...extra };
+  h.run("globalThis.prevented = 0");
+  h.run(`handleKeyDown(${JSON.stringify(evt).replace(/}$/, ", preventDefault() { globalThis.prevented++; } }")})`);
+  return h.run("globalThis.prevented");
+}
+
+const storedPresets = (h) => JSON.parse(h.run("JSON.stringify(parameters.camera_presets)"));
+const presetClasses = (container) => container.children.map((button) => button.className);
+
+// Plays the camera answering a teaching: position, then zoom.
+async function camerasPose(h, pan, tilt, zoom) {
+  if (pan !== undefined) await cameraAnswers(h, "ptz.get", { result: { pan, tilt } });
+  if (zoom !== undefined) await cameraAnswers(h, "zoom.get", { result: { value: zoom } });
+  await flush();
+}
+
+test("presets: ten buttons in two rows (1 to 9 and the fixed 0), only for a camera that can report and take its position", async () => {
+  const none = cameraHarness();
+  await connectCamera(none); // FULL_CAPS: no absolute moves
+  assert.equal(none.elements.get("presetBar").hidden, true);
+  assert.equal(none.elements.get("presetDrawer").hidden, true);
+  assert.equal(presetKey(none, "Digit1"), 0, "the key is not taken when there are no presets");
+
+  const h = cameraHarness();
+  await connectCamera(h, PRESET_CAPS);
+  for (const id of ["presetBar", "presetDrawer"]) {
+    const row = h.elements.get(id);
+    assert.equal(row.hidden, false, id);
+    assert.deepEqual(row.children.map((button) => button.textContent), ["1", "2", "3", "4", "5", "6", "7", "8", "9", "0"]);
+    assert.deepEqual(presetClasses(row), [...Array(9).fill("preset-btn"), "preset-btn is-both is-fixed"], "1 to 9 empty: gray; 0 is always there");
+  }
+  assert.match(h.elements.get("presetBar").children[0].title, /Preset 1 \(empty\)\. Alt\+1 teaches it/);
+  assert.match(h.elements.get("cameraHint").textContent, /Keys 1-9: apply a preset\. Alt\+number: teach/);
+
+  // Only a zoom: still presets, of zoom.
+  const zoomOnly = cameraHarness();
+  await connectCamera(zoomOnly, { zoom: { by: true, absolute: true } });
+  assert.equal(zoomOnly.elements.get("presetBar").hidden, false);
+
+  // The camera goes: the rows go.
+  const id = h.run("cameraProc.id");
+  h.run(`handleCameraProcessEvent({ detail: ${JSON.stringify({ id, action: "exit" })} })`);
+  assert.equal(h.elements.get("presetBar").hidden, true);
+  assert.equal(h.elements.get("presetBar").children.length, 0);
+});
+
+test("presets: Alt+number teaches position and zoom, Alt+Shift the position, Alt+Ctrl the zoom, Alt+Ctrl+Shift deletes", async () => {
+  const h = cameraHarness();
+  await connectCamera(h, PRESET_CAPS);
+
+  assert.equal(presetKey(h, "Digit1", { altKey: true }), 1, "the key is for the presets");
+  await camerasPose(h, -20, 5, 0.5);
+  assert.deepEqual(storedPresets(h), { 1: { pan: -20, tilt: 5, zoom: 0.5 } });
+  assert.match(h.run("withCameraNote('')"), /preset 1 taught: position and zoom/);
+
+  presetKey(h, "Digit2", { altKey: true, shiftKey: true });
+  await camerasPose(h, 30, -4, undefined);
+  presetKey(h, "Digit3", { altKey: true, ctrlKey: true });
+  await camerasPose(h, undefined, undefined, 0.25);
+  assert.deepEqual(storedPresets(h), {
+    1: { pan: -20, tilt: 5, zoom: 0.5 },
+    2: { pan: 30, tilt: -4 },
+    3: { zoom: 0.25 }
+  });
+  assert.equal(cameraRequests(h, "ptz.get").length, 2, "the position is asked for only when it is wanted");
+  assert.equal(cameraRequests(h, "zoom.get").length, 2, "and the zoom too");
+  for (const id of ["presetBar", "presetDrawer"]) {
+    assert.deepEqual(presetClasses(h.elements.get(id)).slice(0, 4), ["preset-btn is-both", "preset-btn is-position", "preset-btn is-zoom", "preset-btn"], id);
+  }
+  assert.match(h.elements.get("presetBar").children[1].title, /Preset 2 \(position\)/);
+  assert.match(h.files.get("/app/vlc_rec_params.json"), /"camera_presets": \{[^]*"pan": -20[^]*"zoom": 0\.25/, "kept in the settings");
+
+  // Teaching again replaces the preset whole: the position of preset 1 only makes it a position preset.
+  presetKey(h, "Digit1", { altKey: true, shiftKey: true });
+  await camerasPose(h, 7, 8, undefined);
+  assert.deepEqual(storedPresets(h)[1], { pan: 7, tilt: 8 });
+  assert.equal(presetClasses(h.elements.get("presetBar"))[0], "preset-btn is-position");
+
+  presetKey(h, "Digit2", { altKey: true, ctrlKey: true, shiftKey: true });
+  assert.deepEqual(Object.keys(storedPresets(h)), ["1", "3"]);
+  assert.equal(presetClasses(h.elements.get("presetBar"))[1], "preset-btn");
+  assert.match(h.run("withCameraNote('')"), /preset 2 deleted/);
+  presetKey(h, "Digit2", { altKey: true, ctrlKey: true, shiftKey: true });
+  assert.match(h.run("withCameraNote('')"), /preset 2 is empty/);
+});
+
+test("presets: a number key applies the position and/or the zoom that was taught", async () => {
+  const h = cameraHarness();
+  h.run("parameters.camera_presets = { 1: { pan: -20, tilt: 5, zoom: 0.5 }, 2: { pan: 30, tilt: -4 }, 3: { zoom: 0.25 } }");
+  await connectCamera(h, PRESET_CAPS);
+  const sent = () => cameraRequests(h, "ptz.moveTo", "zoom.set").map((request) => [request.method, request.params]);
+
+  presetKey(h, "Digit1");
+  assert.deepEqual(sent(), [["ptz.moveTo", { pan: -20, tilt: 5 }], ["zoom.set", { value: 0.5 }]]);
+  assert.match(h.run("withCameraNote('')"), /preset 1 applied/);
+  presetKey(h, "Digit2");
+  presetKey(h, "Numpad3"); // the keypad does the same
+  assert.deepEqual(sent().slice(2), [["ptz.moveTo", { pan: 30, tilt: -4 }], ["zoom.set", { value: 0.25 }]],
+    "a position preset moves only, a zoom preset zooms only");
+
+  presetKey(h, "Digit4");
+  assert.equal(sent().length, 4, "an empty slot sends nothing");
+  assert.match(h.run("withCameraNote('')"), /preset 4 is empty; Alt\+4 teaches it/);
+
+  // A click on the button does the same as the key.
+  h.elements.get("presetBar").children[1].click();
+  assert.deepEqual(sent().at(-1), ["ptz.moveTo", { pan: 30, tilt: -4 }]);
+  h.elements.get("presetDrawer").children[2].click();
+  assert.deepEqual(sent().at(-1), ["zoom.set", { value: 0.25 }]);
+});
+
+test("presets: only the right keys count", async () => {
+  const h = cameraHarness();
+  h.run("parameters.camera_presets = { 1: { pan: 1, tilt: 2 } }");
+  await connectCamera(h, PRESET_CAPS);
+  const moves = () => cameraRequests(h, "ptz.moveTo").length;
+
+  assert.equal(presetKey(h, "Digit1", {}, { target: { tagName: "INPUT" } }), 0, "typing into a field");
+  assert.equal(presetKey(h, "Digit1", {}, { target: { tagName: "SELECT" } }), 0);
+  assert.equal(presetKey(h, "Digit1", { shiftKey: true }), 0, "Shift+1 is an exclamation mark");
+  assert.equal(presetKey(h, "Digit1", { ctrlKey: true }), 0, "Ctrl+1 is for the browser");
+  assert.equal(presetKey(h, "Digit1", { ctrlKey: true, shiftKey: true }), 0);
+  assert.equal(presetKey(h, "Digit1", { metaKey: true }), 0);
+  assert.equal(presetKey(h, "Digit0", { ctrlKey: true }), 0, "Ctrl+0 resets the zoom of the browser");
+  assert.equal(presetKey(h, "Digit0", { shiftKey: true }), 0);
+  assert.equal(presetKey(h, "KeyA"), 0);
+  assert.equal(moves(), 0);
+
+  h.elements.get("scanDialog").hidden = false;
+  assert.equal(presetKey(h, "Digit1"), 0, "not while a dialog is open");
+  h.elements.get("scanDialog").hidden = true;
+
+  assert.equal(presetKey(h, "Digit1", {}, { repeat: true }), 1, "a held key is taken, and does nothing");
+  assert.equal(moves(), 0);
+  presetKey(h, "Digit1");
+  assert.equal(moves(), 1);
+});
+
+test("presets: a camera that can take only part of a preset, and a camera that fails", async () => {
+  // Only a zoom: position teaching is refused, and teaching everything keeps the zoom.
+  const zoomOnly = cameraHarness();
+  zoomOnly.run("parameters.camera_presets = { 2: { pan: 1, tilt: 2, zoom: 0.5 } }");
+  await connectCamera(zoomOnly, { zoom: { by: true, absolute: true } });
+  presetKey(zoomOnly, "Digit1", { altKey: true, shiftKey: true });
+  assert.match(zoomOnly.run("withCameraNote('')"), /cannot report its position/);
+  presetKey(zoomOnly, "Digit1", { altKey: true });
+  await camerasPose(zoomOnly, undefined, undefined, 0.75);
+  assert.deepEqual(storedPresets(zoomOnly)[1], { zoom: 0.75 });
+  presetKey(zoomOnly, "Digit2");
+  assert.equal(cameraRequests(zoomOnly, "ptz.moveTo").length, 0, "the position of preset 2 is not applied: the camera cannot");
+  assert.equal(cameraRequests(zoomOnly, "zoom.set").length, 1, "its zoom is");
+
+  // Only a position.
+  const positionOnly = cameraHarness();
+  await connectCamera(positionOnly, { ptz: { absolute: true } });
+  presetKey(positionOnly, "Digit1", { altKey: true, ctrlKey: true });
+  assert.match(positionOnly.run("withCameraNote('')"), /cannot report its zoom/);
+
+  // The camera does not answer, or says something that is not a position: nothing is stored.
+  const h = cameraHarness();
+  await connectCamera(h, PRESET_CAPS);
+  presetKey(h, "Digit1", { altKey: true });
+  await cameraAnswers(h, "ptz.get", { error: { code: "timeout", message: "The camera did not report its position." } });
+  assert.deepEqual(storedPresets(h), {});
+  assert.match(h.run("withCameraNote('')"), /preset 1 was not taught: The camera did not report its position/);
+  presetKey(h, "Digit1", { altKey: true, shiftKey: true });
+  await cameraAnswers(h, "ptz.get", { result: { pan: "left", tilt: 2 } });
+  assert.deepEqual(storedPresets(h), {}, "an answer that is not a position");
+});
+
+test("presets: deleting or reteaching a slot cancels an older pending teaching", async () => {
+  const h = cameraHarness();
+  await connectCamera(h, PRESET_CAPS);
+  presetKey(h, "Digit1", { altKey: true, shiftKey: true });
+  presetKey(h, "Digit1", { altKey: true, ctrlKey: true, shiftKey: true });
+  await cameraAnswers(h, "ptz.get", { result: { pan: 10, tilt: 20 } });
+  assert.deepEqual(storedPresets(h), {}, "a late reply does not recreate the deleted slot");
+
+  presetKey(h, "Digit1", { altKey: true, shiftKey: true });
+  presetKey(h, "Digit1", { altKey: true, ctrlKey: true });
+  await cameraAnswers(h, "zoom.get", { result: { value: 0.75 } });
+  await cameraAnswers(h, "ptz.get", { result: { pan: 30, tilt: 40 } });
+  assert.deepEqual(storedPresets(h), { 1: { zoom: 0.75 } }, "the latest teaching wins");
+});
+
+test("presets: a failed settings write is reported", async () => {
+  const h = cameraHarness();
+  await connectCamera(h, PRESET_CAPS);
+  h.run('Neutralino.filesystem.writeFile = async () => { throw new Error("disk full"); }');
+  presetKey(h, "Digit1", { altKey: true, shiftKey: true });
+  await cameraAnswers(h, "ptz.get", { result: { pan: 10, tilt: 20 } });
+  assert.match(h.run("withCameraNote('')"), /could not save presets:.*disk full/i);
+});
+
+test("settings: overlapping writes preserve the order of preset changes", async () => {
+  const h = harness();
+  h.run(`let writes = []; let finishFirst;
+    Neutralino.filesystem.writeFile = (_path, data) => new Promise((resolve) => {
+      writes.push(JSON.parse(data));
+      if (writes.length === 1) finishFirst = resolve; else resolve();
+    });
+    parameters.camera_presets = { 1: { zoom: 0.5 } };
+    saveParams('', '', 'first.mkv');
+    parameters.camera_presets = {};
+    saveParams('', '', 'second.mkv');`);
+  await flush();
+  assert.equal(h.run("writes.length"), 1);
+  h.run("finishFirst()");
+  await flush();
+  assert.equal(h.run("writes.length"), 2);
+  assert.equal(h.run("writes[1].output_filename"), "second.mkv");
+  assert.equal(h.run("Object.keys(writes[1].camera_presets).length"), 0);
+});
+
+test("presets: the menu teaches, applies and deletes while keeping the video visible", async () => {
+  const h = cameraHarness();
+  h.enablePlayer();
+  h.run("parameters.camera_presets = { 2: { pan: 30, tilt: -4 } }");
+  await connectCamera(h, PRESET_CAPS);
+  await h.start(false);
+  h.elements.get("videoHost").hidden = false; // the video box is shown while a player runs
+  const menu = h.elements.get("presetMenu");
+  const video = h.elements.get("videoHost");
+  Object.assign(video.style, { left: "0px", top: "0px", width: "640px", height: "360px" });
+  video.getBoundingClientRect = () => ({ left: 10, top: 20, width: parseFloat(video.style.width), height: parseFloat(video.style.height), right: 10 + parseFloat(video.style.width), bottom: 20 + parseFloat(video.style.height) });
+  menu.getBoundingClientRect = () => ({ width: 240, height: 200 });
+  h.elements.get("presetDrawer").children[0].getBoundingClientRect = () => ({ left: 100, top: 200, right: 132, bottom: 226, width: 32, height: 26 });
+  const labels = () => menu.children.slice(1).map((item) => item.children[0].textContent);
+  const enabled = () => menu.children.slice(1).map((item) => !item.disabled);
+
+  // An empty slot: only the teaching is possible.
+  let prevented = 0;
+  h.elements.get("presetBar").children[0].contextmenu({ preventDefault() { prevented++; } });
+  assert.equal(menu.hidden, true, "the compact row has no context menu");
+  h.elements.get("presetDrawer").children[0].contextmenu({ preventDefault() {} });
+  assert.equal(prevented, 1, "the browser's own menu does not open");
+  assert.equal(menu.hidden, false);
+  assert.equal(menu.children[0].textContent, "Preset 1: empty");
+  assert.deepEqual(labels(), ["Apply", "Teach position and zoom", "Teach position only", "Teach zoom only", "Delete"]);
+  assert.deepEqual(enabled(), [false, true, true, true, false]);
+  assert.deepEqual(menu.children.slice(1).map((item) => item.children[1].textContent), ["1", "Alt+1", "Alt+Shift+1", "Alt+Ctrl+1", "Alt+Ctrl+Shift+1"]);
+  assert.ok(!h.stdin.includes("HIDE\n"), "the video stays visible");
+  assert.equal(video.style.width, "640px", "the video geometry is unchanged");
+  assert.equal(menu.style.left, "100px");
+  assert.equal(menu.style.top, "20px");
+
+  menu.children[3].click(); // Teach position only
+  assert.equal(menu.hidden, true);
+  assert.equal(video.style.width, "640px", "the video geometry remains unchanged");
+  await camerasPose(h, 12, 3, undefined);
+  assert.deepEqual(storedPresets(h)[1], { pan: 12, tilt: 3 });
+
+  // A slot with a preset: apply and delete work.
+  h.elements.get("presetDrawer").children[1].contextmenu({ preventDefault() {} });
+  assert.equal(menu.children[0].textContent, "Preset 2: position");
+  assert.deepEqual(enabled(), [true, true, true, true, true]);
+  menu.children[1].click(); // Apply
+  assert.deepEqual(cameraRequests(h, "ptz.moveTo").at(-1).params, { pan: 30, tilt: -4 });
+  h.elements.get("presetDrawer").children[1].contextmenu({ preventDefault() {} });
+  menu.children[5].click(); // Delete
+  assert.deepEqual(Object.keys(storedPresets(h)), ["1"]);
+
+  // Closing: Escape, a press outside, a key of its own. The arrow keys do not turn the camera meanwhile.
+  h.elements.get("presetDrawer").children[0].contextmenu({ preventDefault() {} });
+  h.run('handleKeyDown({ key: "ArrowUp", code: "ArrowUp", target: { tagName: "BODY" }, preventDefault() {} })');
+  h.run('handleKeyDown({ key: "ArrowRight", code: "ArrowRight", target: { tagName: "BODY" }, preventDefault() {} })');
+  assert.equal(cameraRequests(h, "ptz.nudge").length, 0);
+  assert.equal(menu.hidden, false);
+  h.run('handleKeyDown({ key: "Escape", code: "Escape", target: { tagName: "BODY" }, preventDefault() {} })');
+  assert.equal(menu.hidden, true);
+  h.elements.get("presetDrawer").children[0].contextmenu({ preventDefault() {} });
+  h.run("handleWindowPointerDown({ target: {} })");
+  assert.equal(menu.hidden, true);
+  h.elements.get("presetDrawer").children[0].contextmenu({ preventDefault() {} });
+  presetKey(h, "Digit1");
+  assert.equal(menu.hidden, true, "a preset key closes it");
+  h.run("closePresetMenu()"); // nothing to close
+  assert.equal(h.stdin.filter((line) => line === "HIDE\n").length, h.stdin.filter((line) => line === "SHOW\n").length, "every hide has its show");
+});
+
+test("presets: a layout change closes the menu before calculating new video geometry", () => {
+  const h = layoutHarness({ current: ROOM_16_9_WINDOW });
+  h.run("updateLayout(true)");
+  h.run("presetMenu.hidden = false; videoHost.style.width = '10px'");
+  h.run("setVideoSize({ width: 4, height: 3 })");
+  assert.equal(h.elements.get("presetMenu").hidden, true);
+  assert.notEqual(h.host.width, "10px");
+  assert.ok(Math.abs(parseFloat(h.host.width) / parseFloat(h.host.height) - 4 / 3) < 0.01);
+});
+
+test("presets: compact layout stays below the video and filters empty slots only when needed", () => {
+  const h = layoutHarness({ current: ROOM_21_9_WINDOW });
+  const row = h.elements.get("presetBar");
+  h.run("cameraProc = { caps: { ptz: { absolute: true } } }; presetBar.hidden = false; panelOverride = 'compact'; lastAutoCompact = false");
+  row.scrollWidth = 360;
+  row.clientWidth = 100;
+  h.run("updateLayout(true)");
+  assert.equal(h.layout.className, "layout is-stack is-compact");
+  assert.equal(row.classList.names.has("is-filtered"), true);
+  row.clientWidth = 360;
+  h.run("updateLayout(true)");
+  assert.equal(row.classList.names.has("is-filtered"), false);
+});
+
+test("presets: the menu is limited to the visible part of a scrolling drawer", async () => {
+  const h = cameraHarness();
+  await connectCamera(h, PRESET_CAPS);
+  h.run("window.innerWidth = 640; window.innerHeight = 400; videoHost.hidden = false");
+  h.elements.get("drawer").getBoundingClientRect = () => ({ left: 10, top: -100, right: 300, bottom: 600 });
+  h.elements.get("panel").getBoundingClientRect = () => ({ left: 0, top: 0, right: 320, bottom: 100 });
+  h.elements.get("presetMenu").getBoundingClientRect = () => ({ width: 240, height: 200 });
+  h.elements.get("presetDrawer").children[0].getBoundingClientRect = () => ({ left: 250, top: 50, bottom: 76 });
+  h.elements.get("presetDrawer").children[0].contextmenu({ preventDefault() {} });
+  assert.equal(h.elements.get("presetMenu").style.left, "56px");
+  assert.equal(h.elements.get("presetMenu").style.top, "4px");
+  assert.equal(h.elements.get("presetMenu").style.maxHeight, "92px");
+});
+
+test("presets: only sensible presets are read from the settings", async () => {
+  const h = harness();
+  h.files.set("/app/vlc_rec_params.json", JSON.stringify({
+    camera_presets: {
+      0: { pan: 9, tilt: 9, zoom: 0.9 }, 1: { pan: -20, tilt: 5, zoom: 0.5 }, 2: { pan: "x", tilt: 1 }, 3: { zoom: 2 }, 4: { pan: 10 }, 5: null, 6: { pan: 1, tilt: 2, zoom: -1 },
+      10: { zoom: 0.1 }, 7: { zoom: 0 }, 8: "preset", 9: { pan: 400, tilt: 0 }
+    }
+  }));
+  await h.run("loadParams()");
+  assert.deepEqual(storedPresets(h), { 1: { pan: -20, tilt: 5, zoom: 0.5 }, 6: { pan: 1, tilt: 2 }, 7: { zoom: 0 } });
+
+  const absent = harness();
+  await absent.run("loadParams()");
+  assert.deepEqual(storedPresets(absent), {});
+});
+
+test("presets: 0 is the fixed wide shot with the camera centered; it cannot be taught or deleted", async () => {
+  const h = cameraHarness();
+  h.run("parameters.camera_presets = { 1: { pan: -20, tilt: 5, zoom: 0.5 } }");
+  await connectCamera(h, PRESET_CAPS);
+  const sent = () => cameraRequests(h, "ptz.moveTo", "zoom.set").map((request) => [request.method, request.params]);
+  const zero = h.elements.get("presetBar").children[9];
+  assert.equal(zero.textContent, "0");
+  assert.match(zero.title, /Preset 0 \(fixed: wide shot, camera centered\)\. Click or key 0: apply/);
+
+  // The key and the button turn the camera straight ahead and zoom it out fully.
+  assert.equal(presetKey(h, "Digit0"), 1);
+  assert.deepEqual(sent(), [["ptz.moveTo", { pan: 0, tilt: 0 }], ["zoom.set", { value: 0 }]]);
+  assert.match(h.run("withCameraNote('')"), /preset 0 applied \(wide shot, camera centered\)/);
+  presetKey(h, "Numpad0");
+  h.elements.get("presetDrawer").children[9].click();
+  assert.equal(sent().length, 6, "three ways to apply it");
+
+  // Nothing teaches or deletes it: not Alt+0 in any form, not the menu, not the code.
+  for (const modifiers of [{ altKey: true }, { altKey: true, shiftKey: true }, { altKey: true, ctrlKey: true }, { altKey: true, ctrlKey: true, shiftKey: true }]) {
+    assert.equal(presetKey(h, "Digit0", modifiers), 1, "the key is taken, so that the browser does nothing with it");
+    assert.match(h.run("withCameraNote('')"), /preset 0 is fixed \(wide shot, camera centered\): it cannot be taught or deleted/);
+    h.advance(7000);
+  }
+  await flush();
+  assert.equal(cameraRequests(h, "ptz.get").length, 0, "nothing was asked of the camera");
+  assert.equal(cameraRequests(h, "zoom.get").length, 0);
+  assert.equal(sent().length, 6);
+  assert.deepEqual(Object.keys(storedPresets(h)), ["1"], "and nothing was stored");
+  await h.run("teachPreset(0, 'both')");
+  h.run("deletePreset(0)");
+  assert.deepEqual(Object.keys(storedPresets(h)), ["1"]);
+
+  // The menu: Apply only.
+  const menu = h.elements.get("presetMenu");
+  h.elements.get("presetDrawer").children[9].contextmenu({ preventDefault() {} });
+  assert.equal(menu.children[0].textContent, "Preset 0: fixed, wide shot, camera centered");
+  assert.deepEqual(menu.children.slice(1).map((item) => !item.disabled), [true, false, false, false, false]);
+  menu.children[1].click();
+  assert.equal(sent().length, 8, "Apply works from the menu");
+
+  // A camera that can only zoom or only turn does what it can.
+  const zoomOnly = cameraHarness();
+  await connectCamera(zoomOnly, { zoom: { by: true, absolute: true } });
+  presetKey(zoomOnly, "Digit0");
+  assert.deepEqual(cameraRequests(zoomOnly, "ptz.moveTo", "zoom.set").map((request) => request.method), ["zoom.set"]);
 });

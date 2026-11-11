@@ -334,6 +334,158 @@ const E2E_SCENARIO = "__SCENARIO__";
       await sleep(500);
       check("camera: the note is gone once it is in use", bufferPending.hidden === true);
       await shot("camera-buffer-applied", "any", 500);
+      // ---- presets: real keys and the mouse through the X server, a fake camera that remembers what it was told ----
+      const shown = (element) => getComputedStyle(element).display !== "none" && element.getBoundingClientRect().width > 0;
+      check("presets: ten buttons in each row, 1 to 9 and the fixed 0", presetBar.children.length === 10 && presetDrawer.children.length === 10
+        && presetBar.children[9].textContent === "0" && presetBar.children[9].className.includes("is-fixed"));
+      // With settings open the row always belongs to the drawer; compact mode uses the bar.
+      // Window shapes that give each layout; at least one must put the panel below the video.
+      let stackSize = null;
+      for (const [name, width, height] of [["side", 1280, 720], ["tall", 1280, 1000], ["square", 1000, 900], ["wide-short", 1600, 700], ["narrow", 800, 900], ["minimum", 640, 400]]) {
+        await setWindow(width, height);
+        panelOverride = "full";
+        updateLayout(true);
+        await sleep(800);
+        const wideStack = layoutEl.classList.contains("is-stack") && innerWidth >= 900;
+        if (wideStack && !stackSize) stackSize = [width, height];
+        const drawerOpen = !layoutEl.classList.contains("is-compact");
+        check(`presets ${name}: the row is in the settings drawer`,
+          !shown(presetBar) && shown(presetDrawer) === drawerOpen,
+          `bar ${shown(presetBar)}, drawer ${shown(presetDrawer)}, ${layoutEl.className}, ${innerWidth}x${innerHeight}`);
+        const visibleRow = shown(presetBar) ? presetBar : presetDrawer;
+        const rowBox = visibleRow.getBoundingClientRect();
+        check(`presets ${name}: the row is whole inside the window and on one line`,
+          rowBox.left >= 0 && rowBox.right <= innerWidth + 0.5 && (panel.scrollHeight > panel.clientHeight || rowBox.bottom <= innerHeight + 0.5) && rowBox.height < 40,
+          `${Math.round(rowBox.left)},${Math.round(rowBox.top)} ${Math.round(rowBox.width)}x${Math.round(rowBox.height)} in ${innerWidth}x${innerHeight}`);
+        layoutChecks(`camera presets ${name}`);
+        await shot(`camera-presets-${name}`, "any", 400);
+        parameters.camera_presets = { 1: { pan: 1, tilt: 2 }, 3: { zoom: 0.5 } };
+        renderPresets();
+        panelOverride = "compact";
+        updateLayout(true);
+        await sleep(300);
+        const compactBox = presetBar.getBoundingClientRect();
+        check(`presets ${name}: buttons remain reachable with settings closed`, shown(presetBar) && !shown(presetDrawer) &&
+          compactBox.left >= 0 && compactBox.right <= innerWidth + 0.5 && compactBox.bottom <= innerHeight + 0.5,
+          `${layoutEl.className}, ${compactBox.left},${compactBox.top} ${compactBox.width}x${compactBox.height}`);
+        const controlBox = recordBtn.getBoundingClientRect();
+        check(`presets ${name}: presets and controls share a line`, compactBox.top < controlBox.bottom && compactBox.bottom > controlBox.top);
+        const visibleSlots = [...presetBar.children].filter(shown).map((button) => button.textContent);
+        check(`presets ${name}: trained slots and home are visible`, ["1", "3", "0"].every((slot) => visibleSlots.includes(slot)), visibleSlots.join(","));
+        if (presetBar.classList.contains("is-filtered")) {
+          check(`presets ${name}: only trained slots and home are shown when space is tight`, visibleSlots.join(",") === "1,3,0", visibleSlots.join(","));
+        }
+        if (width === 1600) check("presets: all slots return when there is room", visibleSlots.length === 10, visibleSlots.join(","));
+        layoutChecks(`compact camera presets ${name}`);
+        parameters.camera_presets = {};
+        renderPresets();
+      }
+      check("presets: a window shape with the panel below the video was tried", stackSize !== null);
+      // The rest runs with the settings drawer open.
+      await setWindow(...(stackSize || [1280, 720]));
+      panelOverride = "full";
+      updateLayout(true);
+      await sleep(800);
+      const row = shown(presetBar) ? presetBar : presetDrawer;
+      row.scrollIntoView({ block: "nearest" });
+
+      const centre = () => {
+        const box = videoHost.getBoundingClientRect();
+        return [Math.round(box.left + box.width / 2), Math.round(box.top + box.height / 2)];
+      };
+      const centreOf = (element) => {
+        const box = element.getBoundingClientRect();
+        return [Math.round(box.left + box.width / 2), Math.round(box.top + box.height / 2)];
+      };
+      const commands = async (name) => step(name, { action: "camera-state" });
+      // The middle of the picture needs no turn; the click only gives the page the keyboard.
+      await step("input-preset-focus", { action: "input", steps: [{ move: centre(), wait: 200 }, { click: 1, wait: 600 }] });
+      await step("input-preset-teach", { action: "input", steps: [{ key: "alt+1", wait: 1500 }, { key: "alt+shift+2", wait: 1500 }, { key: "alt+ctrl+3", wait: 1500 }] });
+      const taught = parameters.camera_presets;
+      check("presets: Alt+1 stored the position and the zoom", Boolean(taught[1]) && taught[1].pan !== undefined && taught[1].zoom !== undefined, JSON.stringify(taught[1]));
+      check("presets: Alt+Shift+2 stored the position only", Boolean(taught[2]) && taught[2].pan !== undefined && taught[2].zoom === undefined, JSON.stringify(taught[2]));
+      check("presets: Alt+Ctrl+3 stored the zoom only", Boolean(taught[3]) && taught[3].zoom !== undefined && taught[3].pan === undefined, JSON.stringify(taught[3]));
+      check("presets: the settings file has them", (await Neutralino.filesystem.readFile(PARAMS_FILE)).includes('"camera_presets"'));
+
+      // Colours: all four kinds differ, and an empty preset is gray (the same amount of every colour).
+      const swatch = (index) => {
+        const style = getComputedStyle(row.children[index]);
+        return { color: style.backgroundColor, image: style.backgroundImage };
+      };
+      const looks = [0, 1, 2, 3].map(swatch);
+      check("presets: position and zoom, position, zoom and empty look different", new Set(looks.map((look) => `${look.color} ${look.image}`)).size === 4,
+        looks.map((look) => look.image !== "none" ? "gradient" : look.color).join(" | "));
+      check("presets: a preset with both has both colours", looks[0].image.includes("linear-gradient"), looks[0].image);
+      const [r, g, b] = (looks[3].color.match(/\d+/g) || []).map(Number);
+      check("presets: an empty preset is gray", r === g && g === b, looks[3].color);
+      check("presets: the others are not gray", [1, 2].every((i) => { const c = (looks[i].color.match(/\d+/g) || []).map(Number); return !(c[0] === c[1] && c[1] === c[2]); }));
+      await shot("camera-presets", "any", 500);
+
+      // Away from the taught pose and zoom, then the number brings the camera back.
+      const taughtTurn = (preset) => [-Math.round(preset.pan), -Math.round(preset.tilt)];
+      await step("input-preset-away", { action: "input", steps: [{ key: "Right", wait: 400 }, { key: "Right", wait: 400 }, { key: "Up", wait: 400 }, { move: centre(), wait: 100 }, { wheel: "up", wait: 800 }] });
+      let was = await commands("preset-state-1");
+      await step("input-preset-apply-1", { action: "input", steps: [{ key: "1", wait: 2000 }] });
+      let now = await commands("preset-state-2");
+      const lastTurn = now.turns.at(-1);
+      const wanted = taughtTurn(taught[1]);
+      check("presets: the key 1 turned the camera to the taught position", now.turns.length === was.turns.length + 1 && Math.abs(lastTurn[1] - wanted[0]) <= 1 && Math.abs(lastTurn[2] - wanted[1]) <= 1,
+        `turned ${JSON.stringify(lastTurn)}, taught ${JSON.stringify(wanted)}`);
+      check("presets: and set the taught zoom", now.zooms.length === was.zooms.length + 1 && now.zooms.at(-1) === Math.round(taught[1].zoom * 36), `zoom ${now.zooms.at(-1)}, taught ${taught[1].zoom * 36}`);
+
+      // A position preset turns only; a zoom preset zooms only.
+      await step("input-preset-away-2", { action: "input", steps: [{ key: "Left", wait: 400 }, { key: "Left", wait: 400 }, { move: centre(), wait: 100 }, { wheel: "up", wait: 800 }] });
+      was = await commands("preset-state-3");
+      await step("input-preset-apply-2", { action: "input", steps: [{ key: "2", wait: 2000 }] });
+      now = await commands("preset-state-4");
+      check("presets: the key 2 (position only) turned the camera and left the zoom alone", now.turns.length === was.turns.length + 1 && now.zooms.length === was.zooms.length,
+        `turns ${was.turns.length} -> ${now.turns.length}, zooms ${was.zooms.length} -> ${now.zooms.length}`);
+      was = now;
+      await step("input-preset-apply-3", { action: "input", steps: [{ key: "3", wait: 2000 }] });
+      now = await commands("preset-state-5");
+      check("presets: the key 3 (zoom only) zoomed the camera and did not turn it", now.zooms.length === was.zooms.length + 1 && now.turns.length === was.turns.length,
+        `turns ${was.turns.length} -> ${now.turns.length}, zooms ${was.zooms.length} -> ${now.zooms.length}`);
+
+      // The fixed preset 0: straight ahead and zoomed out fully, and nothing teaches or deletes it.
+      const fixedLook = getComputedStyle(row.children[9]);
+      check("presets: the button of 0 has both colours and a ring", fixedLook.backgroundImage.includes("linear-gradient") && fixedLook.boxShadow !== "none", `${fixedLook.boxShadow}`);
+      was = await commands("preset-state-6");
+      await step("input-preset-apply-0", { action: "input", steps: [{ key: "0", wait: 2000 }] });
+      now = await commands("preset-state-7");
+      check("presets: the key 0 turned the camera straight ahead", now.turns.length === was.turns.length + 1 && now.turns.at(-1)[1] === 0 && now.turns.at(-1)[2] === 0,
+        `turned ${JSON.stringify(now.turns.at(-1))}`);
+      check("presets: and zoomed it out fully", now.zooms.length === was.zooms.length + 1 && now.zooms.at(-1) === 0, `zoom ${now.zooms.at(-1)}`);
+      was = now;
+      await step("input-preset-fixed", { action: "input", steps: [{ key: "alt+0", wait: 600 }, { key: "alt+shift+0", wait: 600 }, { key: "alt+ctrl+0", wait: 600 }, { key: "alt+ctrl+shift+0", wait: 800 }] });
+      now = await commands("preset-state-8");
+      check("presets: Alt+0 in all forms changed nothing", parameters.camera_presets[0] === undefined && now.turns.length === was.turns.length && now.zooms.length === was.zooms.length
+        && Boolean(parameters.camera_presets[1]), `${JSON.stringify(Object.keys(parameters.camera_presets))}`);
+      check("presets: and said why", /preset 0 is fixed/.test(statusText + (status.textContent || "")), status.textContent);
+
+      // The menu of a button: a right click opens it next to the button, inside the window; Escape closes it.
+      await step("input-preset-menu", { action: "input", steps: [{ move: centreOf(row.children[3]), wait: 300 }, { click: 3, wait: 800 }] });
+      const menuBox = presetMenu.getBoundingClientRect();
+      check("presets: a right click opens the menu", presetMenu.hidden === false && presetMenu.children.length === 6, `${presetMenu.children.length} children`);
+      check("presets: the menu is whole inside the window", menuBox.left >= 0 && menuBox.top >= 0 && menuBox.right <= innerWidth + 0.5 && menuBox.bottom <= innerHeight + 0.5,
+        `${Math.round(menuBox.left)},${Math.round(menuBox.top)} ${Math.round(menuBox.width)}x${Math.round(menuBox.height)} in ${innerWidth}x${innerHeight}`);
+      const menuVideo = videoHost.getBoundingClientRect();
+      const menuDrawer = drawer.getBoundingClientRect();
+      check("presets: the menu stays inside the settings drawer", menuBox.left >= menuDrawer.left - 0.5 && menuBox.right <= menuDrawer.right + 0.5 &&
+        menuBox.top >= Math.max(menuDrawer.top, panel.getBoundingClientRect().top) - 0.5 && menuBox.bottom <= Math.min(menuDrawer.bottom, panel.getBoundingClientRect().bottom) + 0.5);
+      check("presets: the video remains visible outside the menu", menuVideo.width > 0 && menuVideo.height > 0 &&
+        (menuBox.right <= menuVideo.left + 1 || menuBox.left >= menuVideo.right - 1 || menuBox.bottom <= menuVideo.top + 1 || menuBox.top >= menuVideo.bottom - 1));
+      await shot("camera-preset-menu", "any", 300);
+      await step("input-preset-menu-close", { action: "input", steps: [{ key: "Escape", wait: 600 }] });
+      check("presets: Escape closes the menu", presetMenu.hidden === true);
+
+      // Delete from the menu of the zoom preset.
+      await step("input-preset-menu-delete", { action: "input", steps: [{ move: centreOf(row.children[2]), wait: 300 }, { click: 3, wait: 800 }] });
+      await step("input-preset-menu-delete-click", { action: "input", steps: [{ move: centreOf(presetMenu.children[5]), wait: 300 }, { click: 1, wait: 800 }] });
+      check("presets: Delete in the menu removed preset 3", parameters.camera_presets[3] === undefined && presetMenu.hidden === true, JSON.stringify(parameters.camera_presets[3]));
+      check("presets: and its button is gray again", getComputedStyle(row.children[2]).backgroundColor === looks[3].color);
+      await step("input-preset-delete-key", { action: "input", steps: [{ key: "alt+ctrl+shift+2", wait: 800 }] });
+      check("presets: Alt+Ctrl+Shift+2 deleted preset 2", parameters.camera_presets[2] === undefined, JSON.stringify(parameters.camera_presets[2]));
+
       panelOverride = "";
       await stopAndWait("camera stop");
       await finish();

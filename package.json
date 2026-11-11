@@ -10,6 +10,7 @@
     "start": "neu run",
     "dev": "neu run",
     "build:player": "node scripts/build-player.js",
+    "build:test-stubs": "node scripts/build-player.js --test-stubs",
     "test:e2e": "node tests/e2e/run-e2e.js --mode stub",
     "test:e2e:real": "node tests/e2e/run-e2e.js --mode real",
     "test:e2e:linux": "node tests/e2e/run-linux.js",
