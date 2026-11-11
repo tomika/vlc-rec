@@ -10,7 +10,7 @@ A videó és a felvétel nem külső VLC-ablakban fut, hanem a `vlc-rec-player` 
 Neutralino ablak (app.js)
    │  spawnProcess: egy folyamat szegmensenként
    │  stdin:  RECT x,y,w,h | HIDE | SHOW | STOP
-   │  stdout: JSON sorok (started, stats, video, error, stopped)
+   │  stdout: JSON sorok (started, stats, video, log, window, error, stopped)
    ▼
 vlc-rec-player (native/vlc-rec-player.c)
    ├─ megkeresi az ablakot a NL_PID alapján, és gyerekablakot nyit benne
@@ -167,6 +167,7 @@ Ezek konténerben nem vizsgálhatók, Linuxon és Windowson is el kell végezni:
 | Egy E2E forgatókönyvet kell újrafuttatni | `E2E_ONLY=main` (`main`, `layout`, `aspect`, `closewhile`, `hardkill`, `wrongversion`, `novlc`) |
 | A víruskereső karanténba teszi a `tests/fixtures/stub/win/libvlc.dll`-t (pl. `TR/W64.Evo`) | Heurisztikus találat a MinGW-vel fordított, aláíratlan csonkon, ami csak a tesztekhez kell. Vedd fel kivételnek a `tests/fixtures/stub/` mappát, vagy futtasd a teszteket podmanben (`npm run test:e2e:linux`). |
 | Nem világos, mi történt | Képernyőképek és naplók: `e2e-output/`. A `*-app.log` a lejátszó hibáit is tartalmazza. |
+| Windowson fekete a kép, hiba nincs | Nézd a `neutralinojs.log`-ot: a `Player playing: N bytes read, D pictures decoded, S shown` sor megmondja, hol akad el (nem jön adat / nincs dekódolás / nincs megjelenítés), a `libVLC warning/error [modul]` sorok a libVLC panaszai, a `Player player window ...` sor a gyerekablakokat sorolja (hiányzik a libVLC saját ablaka, ha a video output nem jött létre). Próbák: `VLC_REC_VLC_ARGS=--verbose=2` (minden libVLC-üzenet a naplóba), `--vout=direct3d9`, `--avcodec-hw=none`. A VLC Windowsos DLL-jei és a `plugins` mappa az app mappájában vagy a `VLC_REC_LIBVLC_DIR` mappában legyenek; a `plugins` hiánya `libVLC could not start: unknown error` hibát ad. |
 | `libVLC was not found` | Telepítsd a VLC 3-at. Windowson a `VLC_REC_LIBVLC_DIR` megadhatja a mappát, Linuxon kell a `libvlc5` csomag. |
 | Linuxon `No X11 window found` vagy `no-x11-display` | Az app nem X11-en fut. Indítsd `run-vlc-rec.sh`-val, fejlesztéskor `GDK_BACKEND=x11 npm start`. |
 | Linuxon a lejátszó elindul, de nincs kép és a számláló nem nő | Lehet, hogy hiányzik az SRT-modul. Debian/Ubuntu: `sudo apt install vlc-plugin-access-extra`. A Snap és a Flatpak VLC nem használható. |
