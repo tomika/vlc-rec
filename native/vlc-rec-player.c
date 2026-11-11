@@ -11,6 +11,8 @@
  *   --rect X,Y,W,H   video area in physical pixels, relative to the client area
  *   --record-hex H   output file; preview only when omitted
  *   --mux mkv|mp4    output container, default mkv
+ *   --srt-latency MS SRT latency of the input in ms (VLC's "latency" option of its SRT module), 1..60000;
+ *                    without it VLC's own default is used. The app passes it for a preview only
  *   --caching MS     VLC's network and live caching in ms, 0..60000; VLC's own default is 1000,
  *                    which delays the picture by about that much. Lower it for a picture that
  *                    steers something; too low makes a jittery link stutter
@@ -150,6 +152,7 @@ static char *g_url = NULL;
 static char *g_record = NULL;
 static const char *g_mux = "mkv";
 static int g_caching = -1; /* ms; -1 leaves VLC's default */
+static int g_srt_latency = -1; /* ms; -1 leaves VLC's default */
 static int g_rect[4] = {0, 0, 640, 360};
 
 #ifdef _WIN32
@@ -728,6 +731,11 @@ static int run_player(void)
         snprintf(option, sizeof option, ":live-caching=%d", g_caching);
         vlc.media_add_option(media, option);
     }
+    if (g_srt_latency >= 0) {
+        char option[64];
+        snprintf(option, sizeof option, ":latency=%d", g_srt_latency);
+        vlc.media_add_option(media, option);
+    }
     if (g_record) {
         char *sout = build_sout();
         if (!sout) return 1;
@@ -836,6 +844,7 @@ int main(int argc, char **argv)
         else if (strcmp(argv[i], "--record-hex") == 0) record_hex = argv[i + 1];
         else if (strcmp(argv[i], "--mux") == 0) g_mux = argv[i + 1];
         else if (strcmp(argv[i], "--caching") == 0) g_caching = atoi(argv[i + 1]);
+        else if (strcmp(argv[i], "--srt-latency") == 0) g_srt_latency = atoi(argv[i + 1]);
         else if (strcmp(argv[i], "--rect") == 0) parse_rect(argv[i + 1], g_rect);
     }
 #ifdef _WIN32
@@ -856,6 +865,8 @@ int main(int argc, char **argv)
         return 2;
     }
     if (g_caching > 60000) g_caching = 60000;
+    if (g_srt_latency > 60000) g_srt_latency = 60000;
+    if (g_srt_latency < 1) g_srt_latency = -1;
     if (strcmp(g_mux, "mkv") != 0 && strcmp(g_mux, "mp4") != 0) {
         emit_error("bad-arguments", "Unsupported container.");
         return 2;

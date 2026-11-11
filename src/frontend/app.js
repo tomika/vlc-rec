@@ -34,6 +34,7 @@ const zoomInBtn = document.getElementById("zoomInBtn");
 const cameraSpeed = document.getElementById("cameraSpeed");
 const cameraSpeedValue = document.getElementById("cameraSpeedValue");
 const previewCaching = document.getElementById("previewCaching");
+const srtLatency = document.getElementById("srtLatency");
 const bufferPending = document.getElementById("bufferPending");
 const bufferPendingText = document.getElementById("bufferPendingText");
 const bufferApplyBtn = document.getElementById("bufferApplyBtn");
@@ -73,7 +74,11 @@ const DEFAULT_PARAMS = {
   // depends on the network and the computer: with the 4K stream of a Tail 2 over a LAN and software
   // decoding, 150 ms froze the picture, 250 ms and more moved, 500 ms lost none. 0 and up is taken as
   // it is; -1 leaves VLC's default.
-  preview_caching_ms: 500
+  preview_caching_ms: 500,
+  // SRT latency of the preview in ms, a VLC option on top of the network cache. -1 (the default) leaves VLC's own,
+  // which is the same as not having the option. Only a preview takes it: a recording keeps VLC's default, because
+  // a low latency drops packets on a lossy link, and a hole in a recording stays there.
+  srt_latency_ms: -1
 };
 
 const PARAMS_FILE = `${NL_PATH}/vlc_rec_params.json`;
@@ -1997,6 +2002,20 @@ function describeCaching(ms) {
   return ms < 0 ? "VLC's default (1000 ms)" : `${ms} ms`;
 }
 
+const SRT_LATENCY_MIN_MS = 1;
+const SRT_LATENCY_MAX_MS = 10000;
+
+// SRT latency in ms for the preview, or -1 for VLC's own default (the option is off).
+function srtLatencyMs() {
+  const value = Number(parameters.srt_latency_ms);
+  if (!Number.isFinite(value) || value < SRT_LATENCY_MIN_MS) return -1;
+  return Math.min(SRT_LATENCY_MAX_MS, Math.round(value));
+}
+
+function describeSrtLatency(ms) {
+  return ms < 0 ? "VLC's default" : `${ms} ms`;
+}
+
 // The field shows the buffer in the settings (a setting of -1, VLC's own default, is VLC's 1000); a
 // note appears while the running preview or recording still has another one.
 function showPreviewCaching() {
@@ -2004,14 +2023,41 @@ function showPreviewCaching() {
     const value = previewCachingMs();
     previewCaching.value = String(value < 0 ? 1000 : value);
   }
+  // The SRT latency field is empty while the option is off.
+  if (document.activeElement !== srtLatency) {
+    const latency = srtLatencyMs();
+    srtLatency.value = latency < 0 ? "" : String(latency);
+  }
   const proc = currentProcess;
-  const stale = proc && proc.type === "real" && !proc.exited && proc.cachingMs !== undefined && proc.cachingMs !== previewCachingMs();
+  const running = proc && proc.type === "real" && !proc.exited;
+  const cachingStale = running && proc.cachingMs !== undefined && proc.cachingMs !== previewCachingMs();
+  // Only a preview takes the SRT latency, so only a preview can have an old one.
+  const latencyStale = running && mode === "preview" && proc.srtLatencyMs !== undefined && proc.srtLatencyMs !== srtLatencyMs();
+  const stale = cachingStale || latencyStale;
   bufferPending.hidden = !stale;
   bufferApplyBtn.hidden = !(stale && mode === "preview");
   if (!stale) return;
-  bufferPendingText.textContent = mode === "preview"
-    ? `Not in use yet: the running preview has ${describeCaching(proc.cachingMs)}.`
-    : `Not in use yet: the running recording keeps ${describeCaching(proc.cachingMs)}; the next start takes the new one.`;
+  if (mode !== "preview") {
+    bufferPendingText.textContent = `Not in use yet: the running recording keeps ${describeCaching(proc.cachingMs)}; the next start takes the new one.`;
+    return;
+  }
+  const parts = [];
+  if (cachingStale) parts.push(describeCaching(proc.cachingMs));
+  if (latencyStale) parts.push(`SRT latency ${describeSrtLatency(proc.srtLatencyMs)}`);
+  bufferPendingText.textContent = `Not in use yet: the running preview has ${parts.join(" and ")}.`;
+}
+
+function handleSrtLatencyChange() {
+  const typed = Math.round(Number(srtLatency.value));
+  // Empty (or not a number) switches the option off.
+  const value = srtLatency.value !== "" && Number.isFinite(typed) && typed >= SRT_LATENCY_MIN_MS
+    ? Math.min(SRT_LATENCY_MAX_MS, typed)
+    : -1;
+  parameters.srt_latency_ms = value;
+  srtLatency.value = value < 0 ? "" : String(value);
+  showPreviewCaching();
+  saveParams(parameters.ip_address, parameters.output_path, parameters.output_filename)
+    .catch((err) => logDebug(`Could not save the SRT latency: ${normalizeError(err)}`));
 }
 
 function handlePreviewCachingChange() {
@@ -2041,6 +2087,7 @@ function restartPreview() {
 function buildPlayerCommand(playerPath, streamUri, record, ext, fullOutput, rect) {
   const args = ["--parent-pid", String(NL_PID), "--url-hex", utf8Hex(streamUri), "--rect", rect];
   if (previewCachingMs() >= 0) args.push("--caching", String(previewCachingMs()));
+  if (!record && srtLatencyMs() >= 0) args.push("--srt-latency", String(srtLatencyMs()));
   if (record) args.push("--record-hex", utf8Hex(fullOutput), "--mux", ext === "mp4" ? "mp4" : "mkv");
   return buildCommand(playerPath, args);
 }
@@ -2721,6 +2768,8 @@ async function startOperation({ record, ipAddress, outputPathValue, filenameBase
   const playerPath = simMode ? "" : await findPlayerBinary();
   const args = ["--no-one-instance", "--stats", streamUri];
   if (previewCachingMs() >= 0) args.splice(2, 0, `--network-caching=${previewCachingMs()}`);
+  // External VLC: the SRT module's own option, for a preview only.
+  if (!record && srtLatencyMs() >= 0) args.splice(2, 0, `--latency=${srtLatencyMs()}`);
 
   let rcHost = "";
   if (!simMode && !playerPath && (NL_OS === "Linux" || NL_OS === "Darwin" || NL_OS === "Windows")) {
@@ -2774,6 +2823,8 @@ async function startOperation({ record, ipAddress, outputPathValue, filenameBase
         // A later layout change sends RECT only when it differs from this.
         sentRect: startRect,
         cachingMs: previewCachingMs(),
+        // What a preview was started with; a recording takes no SRT latency.
+        srtLatencyMs: record ? -1 : srtLatencyMs(),
         readBytes: null,
         lineBuffer: "",
         errorMessage: ""
@@ -3132,6 +3183,7 @@ cameraSpeed.addEventListener("change", handleCameraSpeedChange);
 // A slider that keeps the focus would take the arrow keys, which turn the camera.
 cameraSpeed.addEventListener("pointerup", () => cameraSpeed.blur());
 previewCaching.addEventListener("change", handlePreviewCachingChange);
+srtLatency.addEventListener("change", handleSrtLatencyChange);
 bufferApplyBtn.addEventListener("click", () => restartPreview().catch(() => {}));
 window.addEventListener("keydown", handleKeyDown);
 window.addEventListener("pointerdown", handleWindowPointerDown);

@@ -1971,3 +1971,120 @@ test("presets: 0 is the fixed wide shot with the camera centered; it cannot be t
   presetKey(zoomOnly, "Digit0");
   assert.deepEqual(cameraRequests(zoomOnly, "ptz.moveTo", "zoom.set").map((request) => request.method), ["zoom.set"]);
 });
+
+// ---- SRT latency of the preview ----
+
+test("the SRT latency is off by default and then no option reaches the player or VLC", async () => {
+  const h = harness();
+  h.enablePlayer();
+  await h.start(false);
+  assert.ok(!h.launches[0].includes("--srt-latency"), h.launches[0]);
+  await h.exit();
+
+  const external = harness(); // no player binary: external VLC
+  await external.start(false);
+  assert.ok(!/--latency/.test(external.launches[0]), external.launches[0]);
+});
+
+test("a set SRT latency goes to the preview only, to the player and to external VLC", async () => {
+  const h = harness();
+  h.enablePlayer();
+  h.run("parameters.srt_latency_ms = 40");
+  await h.start(false);
+  assert.ok(h.launches[0].includes('"--srt-latency" "40"'), h.launches[0]);
+  await h.exit();
+  await h.start(true);
+  assert.ok(!h.launches[1].includes("--srt-latency"), "a recording keeps VLC's default: " + h.launches[1]);
+
+  const external = harness();
+  external.run("parameters.srt_latency_ms = 40");
+  await external.start(false);
+  assert.match(external.launches[0], /--latency=40/);
+  await external.exit();
+  await external.start(true);
+  assert.ok(!/--latency/.test(external.launches[1]), external.launches[1]);
+});
+
+test("the SRT latency field takes whole milliseconds, empty or nonsense switches it off", async () => {
+  const h = harness();
+  const field = h.elements.get("srtLatency");
+  await h.run("refreshState()");
+  assert.equal(field.value, "", "off: an empty field");
+
+  field.value = "40";
+  field.change();
+  assert.equal(h.run("parameters.srt_latency_ms"), 40);
+  assert.match(h.files.get("/app/vlc_rec_params.json"), /"srt_latency_ms": 40/, "saved");
+
+  field.value = "999999";
+  field.change();
+  assert.equal(h.run("parameters.srt_latency_ms"), 10000);
+  assert.equal(field.value, "10000");
+
+  for (const off of ["", "0", "-5", "abc"]) {
+    field.value = "40";
+    field.change();
+    field.value = off;
+    field.change();
+    assert.equal(h.run("parameters.srt_latency_ms"), -1, `"${off}" switches it off`);
+    assert.equal(field.value, "");
+  }
+  assert.match(h.files.get("/app/vlc_rec_params.json"), /"srt_latency_ms": -1/);
+
+  // A setting from the file that is not a number or is below 1 is off too.
+  for (const bad of ['"x"', "0", "-3", "null"]) {
+    h.run(`parameters.srt_latency_ms = ${bad}`);
+    assert.equal(h.run("srtLatencyMs()"), -1, bad);
+  }
+});
+
+test("a running preview says that it has another SRT latency, and the button restarts it with the new one", async () => {
+  const h = harness();
+  h.enablePlayer();
+  const field = h.elements.get("srtLatency");
+  const pending = h.elements.get("bufferPending");
+  const apply = h.elements.get("bufferApplyBtn");
+  const text = () => h.elements.get("bufferPendingText").textContent;
+  await h.start(false);
+  await h.run("refreshState()");
+  assert.equal(pending.hidden, true, "nothing to say while the preview has what the fields say");
+
+  field.value = "60";
+  field.change();
+  assert.equal(pending.hidden, false);
+  assert.equal(apply.hidden, false);
+  assert.equal(text(), "Not in use yet: the running preview has SRT latency VLC's default.");
+
+  // Both fields changed: both are named.
+  h.elements.get("previewCaching").value = "300";
+  h.elements.get("previewCaching").change();
+  assert.equal(text(), "Not in use yet: the running preview has 500 ms and SRT latency VLC's default.");
+
+  apply.click();
+  for (let i = 0; i < 6; i += 1) await new Promise((resolve) => setImmediate(resolve));
+  await h.run("refreshState()");
+  assert.equal(h.launches.length, 2, "the preview started again");
+  assert.ok(h.launches[1].includes('"--srt-latency" "60"') && h.launches[1].includes('"--caching" "300"'), h.launches[1]);
+  assert.equal(pending.hidden, true, "and now both are in use");
+
+  // Back to off while it runs: the note names the latency that runs.
+  field.value = "";
+  field.change();
+  assert.equal(text(), "Not in use yet: the running preview has SRT latency 60 ms.");
+});
+
+test("a recording takes no SRT latency, so a changed one is nothing to note", async () => {
+  const h = harness();
+  h.enablePlayer();
+  await h.start(true);
+  await h.run("refreshState()");
+  const field = h.elements.get("srtLatency");
+  field.value = "40";
+  field.change();
+  assert.equal(h.elements.get("bufferPending").hidden, true, "a recording never had it");
+
+  h.elements.get("previewCaching").value = "200";
+  h.elements.get("previewCaching").change();
+  assert.equal(h.elements.get("bufferPending").hidden, false, "the buffer is another matter");
+  assert.match(h.elements.get("bufferPendingText").textContent, /recording keeps 500 ms/);
+});

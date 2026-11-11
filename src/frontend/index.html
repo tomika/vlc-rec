@@ -54,10 +54,19 @@
               ms
             </label>
           </div>
+          <label class="buffer-option">
+            Preview SRT latency
+            <input id="srtLatency" class="text-input buffer-input" type="number" min="1" max="10000" step="10" placeholder="default" aria-label="Preview SRT latency in milliseconds, empty for VLC's default" aria-describedby="srtLatencyHint" />
+            ms
+          </label>
           <p id="bufferHint" class="drawer-hint">
             Applies when the preview starts, not to one that is running. Less buffer means less delay, but too little
             freezes the picture. How little works depends on the network and this computer: lower it until the picture
             stutters, then raise it a little.
+          </p>
+          <p id="srtLatencyHint" class="drawer-hint">
+            SRT latency: how long the receiver waits for lost packets. Empty is VLC's default. Lower may cut some delay,
+            but too low drops packets on a lossy link (a blocky picture). It applies to the preview only; a recording keeps the default.
           </p>
           <!-- Shown while the running preview or recording was started with another buffer than the field says. -->
           <div id="bufferPending" class="buffer-pending" role="status" hidden>
