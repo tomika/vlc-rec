@@ -38,6 +38,8 @@ const srtLatency = document.getElementById("srtLatency");
 const bufferPending = document.getElementById("bufferPending");
 const bufferPendingText = document.getElementById("bufferPendingText");
 const bufferApplyBtn = document.getElementById("bufferApplyBtn");
+const cameraPluginItem = document.getElementById("cameraPluginItem");
+const cameraPluginSelect = document.getElementById("cameraPluginSelect");
 const cameraPage = document.getElementById("cameraPage");
 const cameraAddressText = document.getElementById("cameraAddressText");
 const cameraPageBtn = document.getElementById("cameraPageBtn");
@@ -58,7 +60,7 @@ const DEFAULT_PARAMS = {
   auto_reconnect: false,
   stall_timeout_sec: 15,
   // Optional camera control through an adapter (plugins/<id>/, docs/camera-plugin-interface.md).
-  // camera_plugin is the id of the adapter ("" switches the feature off) and camera_config what its
+  // camera_plugin is the id of the adapter ("" selects the sole available adapter) and camera_config what its
   // manifest asks for (the address of the camera, ...). camera_turn_speed is the speed of a turn after
   // a click in degrees per second; the slider next to the zoom buttons changes it. The zoom step is a
   // percent of the zoom range, the arrow key step is in degrees.
@@ -1284,6 +1286,59 @@ async function pluginSearchDirs() {
   const playerDir = await Neutralino.os.getEnv("VLC_REC_PLAYER_DIR") || `${NL_PATH}/player`;
   dirs.push(`${playerDir}/plugins`);
   return dirs;
+}
+
+// Discover unique usable adapters in search order. An invalid copy does not mask a valid one.
+async function discoverCameraPlugins() {
+  const ids = new Set();
+  for (const dir of await pluginSearchDirs()) {
+    try {
+      for (const entry of await Neutralino.filesystem.readDirectory(dir)) {
+        if (entry.type === "DIRECTORY" && PLUGIN_ID_PATTERN.test(entry.entry)) ids.add(entry.entry);
+      }
+    } catch (err) {
+      logDebug(`Could not scan camera adapters in ${dir}: ${normalizeError(err)}`);
+    }
+  }
+  const plugins = [];
+  for (const id of ids) {
+    const found = await findPlugin(id);
+    if (found) plugins.push({ id, name: found.manifest.name || id });
+  }
+  return plugins;
+}
+
+async function setupCameraPlugins() {
+  const plugins = await discoverCameraPlugins();
+  const selected = String(parameters.camera_plugin || "").trim();
+  if (!selected && plugins.length === 1) parameters.camera_plugin = plugins[0].id;
+  cameraPluginItem.hidden = plugins.length < 2;
+  const options = [];
+  if (!parameters.camera_plugin || !plugins.some((plugin) => plugin.id === parameters.camera_plugin)) {
+    const placeholder = document.createElement("option");
+    placeholder.value = "";
+    placeholder.textContent = "Select a camera adapter";
+    options.push(placeholder);
+  }
+  for (const plugin of plugins) {
+    const option = document.createElement("option");
+    option.value = plugin.id;
+    option.textContent = plugin.name;
+    options.push(option);
+  }
+  cameraPluginSelect.replaceChildren(...options);
+  cameraPluginSelect.value = plugins.some((plugin) => plugin.id === parameters.camera_plugin) ? parameters.camera_plugin : "";
+}
+
+async function selectCameraPlugin() {
+  const id = cameraPluginSelect.value;
+  if (!id || id === parameters.camera_plugin) return;
+  parameters.camera_plugin = id;
+  const host = await cameraHostFor(parseAddressPort(parameters.ip_address).host);
+  if (host) parameters.camera_config = { ...(parameters.camera_config || {}), host };
+  try { await saveParams(parameters.ip_address, parameters.output_path, parameters.output_filename); }
+  catch (err) { setCameraNote(`could not save camera adapter: ${normalizeError(err)}`); }
+  await restartCamera();
 }
 
 // The program to start and its arguments, from the manifest: the entry for this system and architecture
@@ -3020,6 +3075,7 @@ async function init() {
   });
 
   await loadParams();
+  await setupCameraPlugins();
   videoHost.hidden = !await findPlayerBinary();
   layoutReady = true;
   await refreshState();
@@ -3177,6 +3233,7 @@ videoHost.addEventListener("click", handleVideoClick);
 stage.addEventListener("wheel", handleStageWheel, { passive: false });
 zoomInBtn.addEventListener("click", () => zoomCamera(cameraZoomStep()));
 zoomOutBtn.addEventListener("click", () => zoomCamera(-cameraZoomStep()));
+cameraPluginSelect.addEventListener("change", () => selectCameraPlugin().catch((err) => setCameraNote(normalizeError(err))));
 cameraPageBtn.addEventListener("click", () => openCameraPage().catch(() => {}));
 cameraSpeed.addEventListener("input", handleCameraSpeedInput);
 cameraSpeed.addEventListener("change", handleCameraSpeedChange);

@@ -72,6 +72,16 @@ function harness() {
       if (!files.has(path)) throw new Error("missing file");
       return { size: files.get(path) };
     },
+    async readDirectory(path) {
+      const names = new Set();
+      for (const key of files.keys()) {
+        if (key.startsWith(path + "/")) {
+          const rest = key.slice(path.length + 1);
+          if (rest.includes("/")) names.add(rest.split("/")[0]);
+        }
+      }
+      return [...names].map((entry) => ({ entry, type: "DIRECTORY" }));
+    },
     async getJoinedPath(...parts) { return parts.join("/"); },
     async writeFile(path, data) { files.set(path, data); },
     async readFile(path) { return files.get(path); }
@@ -844,6 +854,28 @@ test("Windows RC statistics command reads a real TCP response and handles a clos
 // wrote to its stdin are read back, and the answers come in through the process events.
 
 const pluginManifest = readFileSync(resolve(__dirname, "../plugins/obsbot-tail2/plugin.json"), "utf8");
+
+test("camera: discover adapters, select a sole adapter and offer multiple choices", async () => {
+  const h = harness();
+  putAdapter(h, "/app/player/plugins");
+  putAdapter(h, "/app/plugins");
+  await h.run("setupCameraPlugins()");
+  assert.equal(h.run("parameters.camera_plugin"), "obsbot-tail2");
+  assert.equal(h.elements.get("cameraPluginItem").hidden, true);
+  const manifest = JSON.parse(pluginManifest);
+  manifest.id = "another";
+  manifest.name = "Another camera";
+  h.files.set("/app/plugins/another/plugin.json", JSON.stringify(manifest));
+  h.files.set("/app/plugins/another/obsbot-tail2-win_x64.exe", 1);
+  h.run('parameters.camera_plugin = ""');
+  await h.run("setupCameraPlugins()");
+  assert.equal(h.run("parameters.camera_plugin"), "");
+  assert.equal(h.elements.get("cameraPluginItem").hidden, false);
+  assert.equal(h.elements.get("cameraPluginSelect").children.length, 3);
+  h.run('parameters.camera_plugin = "obsbot-tail2"');
+  await h.run("setupCameraPlugins()");
+  assert.equal(h.elements.get("cameraPluginSelect").value, "obsbot-tail2");
+});
 
 const FULL_CAPS = {
   device: { model: "OBSBOT Tail 2", address: "192.168.1.50" },
