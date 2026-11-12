@@ -2014,6 +2014,7 @@ test("the SRT latency field takes whole milliseconds, empty or nonsense switches
   field.value = "40";
   field.change();
   assert.equal(h.run("parameters.srt_latency_ms"), 40);
+  await h.run("pendingParamsWrite");
   assert.match(h.files.get("/app/vlc_rec_params.json"), /"srt_latency_ms": 40/, "saved");
 
   field.value = "999999";
@@ -2029,6 +2030,7 @@ test("the SRT latency field takes whole milliseconds, empty or nonsense switches
     assert.equal(h.run("parameters.srt_latency_ms"), -1, `"${off}" switches it off`);
     assert.equal(field.value, "");
   }
+  await h.run("pendingParamsWrite");
   assert.match(h.files.get("/app/vlc_rec_params.json"), /"srt_latency_ms": -1/);
 
   // A setting from the file that is not a number or is below 1 is off too.
