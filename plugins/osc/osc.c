@@ -1,5 +1,5 @@
 /*
- * obsbot-tail2: camera adapter for vlc-rec. Turns and zooms an OBSBOT Tail 2 over its documented
+ * osc: camera adapter for vlc-rec. Turns and zooms an OBSBOT Tail 2 over its documented
  * OSC interface (UDP). The adapter interface (JSON Lines on stdin and stdout, manifest, capabilities)
  * is described in docs/camera-plugin-interface.md; this is its first implementation. The app
  * has no socket API, so the adapter is a separate process that the app starts by the manifest
@@ -806,7 +806,7 @@ static int handle_request(char *line)
 
     if (strcmp(method, "hello") == 0) {
         snprintf(result, sizeof result,
-                 "{\"interface\":1,\"plugin\":{\"id\":\"obsbot-tail2\",\"name\":\"OBSBOT Tail 2\",\"version\":\"0.1.0\"}}");
+                 "{\"interface\":1,\"plugin\":{\"id\":\"osc\",\"name\":\"OBSBOT OSC\",\"version\":\"0.1.0\"}}");
     } else if (strcmp(method, "shutdown") == 0) {
         if (has_id) respond_ok(id, "{}");
         return 0;

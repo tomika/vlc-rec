@@ -2,7 +2,7 @@
 
 The app can control the camera that produces the SRT stream: turn it by clicking the picture, zoom, and open the camera's own control page. The app knows nothing about any camera. It talks to an **adapter**, a small separate program written for one camera model (or one protocol: OSC, VISCA, HTTP, ...), through a fixed interface. Anyone can write an adapter for their own camera and drop it into a folder; the app does not change.
 
-**Status.** Interface version 1 is implemented: discovery by manifest, the JSON Lines protocol, the `hello`/`connect` handshake with capabilities, click to centre, small turns (arrow keys), turning speed, relative zoom, absolute moves with presets 1 to 9 kept by the app, and the camera's web page. The app draws only the controls that the capabilities declare. The first adapter is `plugins/obsbot-tail2/` (OBSBOT Tail 2 over its OSC interface). Sections marked **Planned** are the designed rest of the interface (continuous drive, focus, presets kept in the camera, image settings, actions such as formatting the SD card) and are not built; an adapter and the app ignore what they do not know, so they can be added without breaking version 1.
+**Status.** Interface version 1 is implemented: discovery by manifest, the JSON Lines protocol, the `hello`/`connect` handshake with capabilities, click to centre, small turns (arrow keys), turning speed, relative zoom, absolute moves with presets 1 to 9 kept by the app, the camera's web page, and optional AI tracking with state polling and a visual indicator. The app draws only the controls that the capabilities declare. The first adapter is `plugins/osc/` (OBSBOT Tail 2 over its OSC interface). Sections marked **Planned** are the designed rest of the interface (continuous drive, focus, presets kept in the camera, image settings, actions such as formatting the SD card) and are not built; an adapter and the app ignore what they do not know, so they can be added without breaking version 1.
 
 ## Goals and non-goals
 
@@ -26,8 +26,8 @@ The frontend runs in Neutralino. Its allow list is `app`, `os`, `filesystem`, an
 
 - It can use UDP, TCP, HTTP, USB or whatever the camera needs, in any language.
 - A crash or hang in an adapter cannot take the app down.
-- Licensing is separated. The app only talks to a program through stdin and stdout.
-- Nothing from the adapter has to be listed in `neutralino.config.json` or in the AppImage build script by name; a folder in `player/plugins/` is enough.
+- The app talks to separately installed programs through stdin and stdout; their source and distribution are managed separately.
+- External adapters are installed through `VLC_REC_PLUGIN_DIR` or the settings-folder `plugins` directory. Public release payloads are restricted to `packaging/public-plugins.txt`; installing a local adapter does not include it in a release.
 
 Trade-off: an adapter written in Python or Node needs that runtime on the user's machine. A compiled adapter does not. This is the author's choice and does not affect the interface.
 
@@ -37,10 +37,10 @@ An adapter is a folder named after its id, with a `plugin.json` and the files it
 
 ```
 plugins/
-  obsbot-tail2/
+  osc/
     plugin.json
-    obsbot-tail2-linux_x64
-    obsbot-tail2-win_x64.exe
+    osc-linux_x64
+    osc-win_x64.exe
 ```
 
 The app looks for `<dir>/<id>/plugin.json` in these folders, the first match wins:
@@ -56,12 +56,12 @@ Adapters are never downloaded by the app. Installing one means copying a folder,
 ```json
 {
   "interface": 1,
-  "id": "obsbot-tail2",
-  "name": "OBSBOT Tail 2",
+  "id": "osc",
+  "name": "OBSBOT OSC",
   "version": "0.1.0",
   "command": {
-    "win_x64": ["obsbot-tail2-win_x64.exe"],
-    "linux_x64": ["./obsbot-tail2-linux_x64"]
+    "win_x64": ["osc-win_x64.exe"],
+    "linux_x64": ["./osc-linux_x64"]
   },
   "config": [
     { "key": "host", "label": "Camera address", "type": "string", "required": true },
@@ -79,7 +79,7 @@ Adapters are never downloaded by the app. Installing one means copying a folder,
 
 ```json
 {
-  "camera_plugin": "obsbot-tail2",
+  "camera_plugin": "osc",
   "camera_config": { "host": "192.168.1.50" },
   "camera_turn_speed": 10,
   "camera_zoom_step": 10,
@@ -88,7 +88,7 @@ Adapters are never downloaded by the app. Installing one means copying a folder,
 }
 ```
 
-- `camera_plugin`: the id of the adapter; empty (the default) means no process is started and no camera UI exists.
+- `camera_plugin`: the id of the adapter; empty (the default) selects the sole usable adapter automatically. When several are available, the settings offer a choice.
 - `camera_config`: what `connect` gets. Fields the manifest declares are taken from here, missing ones from the manifest's defaults. Edit the file for now (**Planned:** a form made from the manifest).
 - `camera_turn_speed`: the speed of a turn after a click, in the unit of `ptz.speed` (degrees per second). The slider changes it.
 - `camera_zoom_step`: percent of the zoom range per button press; a wheel notch is half of that.
@@ -156,7 +156,7 @@ app                                  adapter
 
 ## Methods (version 1)
 
-All of `ptz.*` and `zoom.*` are optional: the adapter declares what it supports in `capabilities`, and the app only calls what is declared.
+All of `ptz.*`, `zoom.*` and `ai.*` are optional: the adapter declares what it supports in `capabilities`, and the app only calls what is declared.
 
 | method | params | result | notes |
 |---|---|---|---|
@@ -164,6 +164,9 @@ All of `ptz.*` and `zoom.*` are optional: the adapter declares what it supports 
 | `connect` | `config` | `{capabilities}` | Opens the link to the camera. May be called again after a failure. |
 | `shutdown` | none | `{}` | Then the adapter exits. End of stdin also means shutdown. |
 | `ptz.centerOn` | `x`, `y` (0..1, origin top left of the visible picture), `aspect` (width / height) | `{}` | Turn the camera so that the clicked point ends up in the middle. Needs `ptz.centerOn`. See [Click to centre](#click-to-centre). Outcome in `event turned`. |
+| `ai.trackPerson` | `x`, `y` (0..1, origin top left) | `{}` | Request tracking of the person at the point. Needs `ai.trackPerson`. An asynchronous adapter may accept the request before target acquisition; success must not be presented as confirmed acquisition. |
+| `ai.get` | none | `{enabled: boolean}` | Read the camera's current tracking mode. Needs `ai.status`. |
+| `ai.stop` | none | `{}` | Turn off tracking. Needs `ai.stop`. Before applying a preset, the app waits until `ai.get` confirms tracking is off. |
 | `ptz.nudge` | `pan`, `tilt` (degrees, right and up positive) | `{}` | A small turn by this much, meant for key repeat: it builds on the last target while that is recent, so it neither waits for a readout nor lets the readout jitter in. Needs `ptz.nudge`. Outcome in `event nudged`. |
 | `ptz.setSpeed` | `value` | `{}` | The speed of `ptz.centerOn`, in the unit and range of `ptz.speed`. The app sends its saved speed after `connect`. |
 | `ptz.get` | none | `{pan, tilt}` | Degrees. While a turn that was asked for is still running, the position it is going to, not the one on the way: a preset taught right after a click is the point of the click. Needs `ptz.absolute`. |
@@ -191,6 +194,8 @@ The result of `connect`, and re-sent as `event capabilities` when something chan
 |---|---|
 | `device.model`, `device.address` | Shown in the camera block of the drawer. |
 | `ptz.centerOn` | `"native"` (the camera does it) or `"estimated"` (computed from the optics): a click on the picture turns the camera. |
+| `ai.trackPerson` | Double-click a person to request tracking. The first click waits for the configured interval before centering; a later double-click does not issue a tracking request. |
+| `ai.status` and `ai.stop` | Poll actual tracking state, show a blue preview edge while enabled, and stop tracking on the next double-click or before applying a preset. |
 | `ptz.nudge` | The arrow keys turn the camera. |
 | `ptz.absolute` | `ptz.get` and `ptz.moveTo` work: position presets. |
 | `zoom.absolute` | `zoom.get` and `zoom.set` work: zoom presets. |
@@ -369,7 +374,7 @@ Read-only values the camera reports are properties with `readOnly: true` (`type:
 
 ## Reference implementation
 
-`plugins/obsbot-tail2/` is the first adapter: `plugin.json` and `obsbot-tail2.c` (C without dependencies: OSC over UDP, the geometry of the click, a small JSON reader). `native/build.sh` builds it for Linux and Windows into `player/plugins/obsbot-tail2/` together with its manifest, `neutralino.config.json` copies `player/` into the application, and the AppImage and Linux launcher packaging copy the folder for their architecture. Its config: `host` (required), `hfov`, `zoomRatio`, `zoomMax`, `nudgeSpeed`, `oscPort`, `localPort` (see its manifest). `tools/camera/fake_osc_camera.py` is a fake Tail 2 for the tests, and `tests/e2e/camera-plugin.js` runs the adapter against it.
+`plugins/osc/` is the first adapter: `plugin.json` and `osc.c` (C without dependencies: OSC over UDP, the geometry of the click, a small JSON reader). `native/build.sh` builds it for Linux and Windows into `player/plugins/osc/` together with its manifest, `neutralino.config.json` copies `player/` into the application, and the AppImage and Linux launcher packaging copy the folder for their architecture. Its config: `host` (required), `hfov`, `zoomRatio`, `zoomMax`, `nudgeSpeed`, `oscPort`, `localPort` (see its manifest). `tools/camera/fake_osc_camera.py` is a fake Tail 2 for the tests, and `tests/e2e/camera-plugin.js` runs the adapter against it.
 
 ## Measured on a real Tail 2 over OSC (2026-11-11)
 
@@ -391,3 +396,7 @@ These change how an OSC mapping has to be built:
 3. Restarting an adapter that exits, with backoff.
 4. Several cameras. Not in version 1. If needed: `camera` as an id string on every request and event, and `cameras` in the connect result.
 5. Passwords for cameras that need one. The `secret: true` config flag exists, but where the app would store it (the settings file is plain text) is undecided.
+
+## Public and external implementations
+
+`plugins/osc` is the bundled public implementation of documented OSC PTZ and zoom operations. It does not implement AI selection or status. The `ai.trackPerson`, `ai.get` and `ai.stop` methods above belong to the app contract and can be implemented by independently installed adapters. AI tests use an in-memory JSON Lines fixture, without a device transport. No SDK packet layouts, endpoint paths or vendor SDK declarations are part of this specification. See [plugin separation](plugin-separation.md).

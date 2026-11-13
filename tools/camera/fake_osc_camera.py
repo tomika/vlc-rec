@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""A fake OBSBOT camera speaking the documented OSC subset, to test the obsbot-tail2 adapter without hardware.
+"""A fake OBSBOT camera speaking the documented OSC subset, to test the osc adapter without hardware.
 
 Listens on UDP 57110 and answers to the sender's address, port 57120 (the layout the
 OSC definition describes). It keeps a gimbal position and a zoom value, moves the

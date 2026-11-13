@@ -5,7 +5,7 @@
 //   podman run --rm --network host -v REPO/player:/p:ro -v REPO/tools/camera:/t:ro \
 //     localhost/vlc-rec-e2e:1 node /t/verify-centering.js 192.168.1.50 [zoom steps in the camera's units...]
 //
-// For some points of the picture the obsbot-tail2 adapter is asked to ptz.centerOn them, as a click would. A patch
+// For some points of the picture the osc adapter is asked to ptz.centerOn them, as a click would. A patch
 // around the point is cut out of the picture taken before, and looked for in the picture taken
 // after the turn (normalised cross correlation). It should now be in the middle. After each turn
 // the camera is turned back, and at the end the zoom is put back too.
@@ -92,7 +92,7 @@ async function main() {
   const ffmpeg = spawn("ffmpeg", ["-hide_banner", "-loglevel", "error", "-y",
     "-i", `srt://${IP}:5000?mode=caller&latency=200&connect_timeout=8000`,
     "-vf", `fps=2,scale=${W}:${H},format=gray`, "-f", "image2", "-update", "1", "-atomic_writing", "1", FRAME], { stdio: "inherit" });
-  const adapter = spawn("/p/plugins/obsbot-tail2/obsbot-tail2-linux_x64", [], { stdio: ["pipe", "pipe", "inherit"] });
+  const adapter = spawn("/p/plugins/osc/osc-linux_x64", [], { stdio: ["pipe", "pipe", "inherit"] });
   process.on("exit", () => { ffmpeg.kill("SIGKILL"); adapter.kill("SIGKILL"); });
 
   // Requests get their answer by id; the events of the adapter are kept by name, the latest of each.

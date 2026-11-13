@@ -78,6 +78,11 @@ body {
   display: none;
 }
 
+/* The native player is inset by app.js while tracking, leaving this edge visible. */
+.video-host.ai-tracking {
+  background: #168cff;
+}
+
 .video-placeholder {
   padding: 8px;
   text-align: center;

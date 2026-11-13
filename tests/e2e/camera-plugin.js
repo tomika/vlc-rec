@@ -1,4 +1,4 @@
-// Tests the obsbot-tail2 adapter (player/plugins/obsbot-tail2) against the fake OSC camera, in a container.
+// Tests the osc adapter (player/plugins/osc) against the fake OSC camera, in a container.
 //   node tests/e2e/camera-plugin.js
 // Needs podman or docker and the built adapter (npm run build:player, or the gcc lines for the
 // plugin in native/build.sh). No camera, no window. The expected turn angles come from a second,
@@ -10,7 +10,7 @@ const path = require("node:path");
 const repo = path.resolve(__dirname, "..", "..");
 const IMAGE = "localhost/vlc-rec-e2e:1";
 const tool = spawnSync("podman", ["--version"], { stdio: "ignore" }).error ? "docker" : "podman";
-const PLUGIN = "/repo/player/plugins/obsbot-tail2/obsbot-tail2-linux_x64";
+const PLUGIN = "/repo/player/plugins/osc/osc-linux_x64";
 
 const HFOV = 80;
 const RATIO = 12;
@@ -75,6 +75,8 @@ const run3 = [
   request("connect", { config: { host: "127.0.0.2" } }),
   request("bogus.method", {}),
   request("hello", { interface: 1 }),
+  request("ai.trackPerson", { x: 0.5, y: 0.5 }),
+  request("ai.get", {}), request("ai.stop", {}),
   request("shutdown", {})
 ];
 
@@ -129,9 +131,10 @@ const events = (messages, name) => messages.filter((m) => m.event === name);
 const response = (messages, id) => messages.find((m) => m.id === id);
 
 // ---- the handshake and the capabilities ----
-assert.deepEqual(response(messages1, 1).result, { interface: 1, plugin: { id: "obsbot-tail2", name: "OBSBOT Tail 2", version: "0.1.0" } });
+assert.deepEqual(response(messages1, 1).result, { interface: 1, plugin: { id: "osc", name: "OBSBOT OSC", version: "0.1.0" } });
 const caps = response(messages1, 2).result.capabilities;
 assert.equal(caps.device.model, "OBSBOT Tail 2");
+assert.equal(caps.ai, undefined, "the public OSC adapter exposes no AI transport");
 assert.equal(caps.device.address, "127.0.0.1");
 assert.equal(caps.ptz.centerOn, "estimated");
 assert.equal(caps.ptz.nudge, true);
@@ -235,4 +238,5 @@ assert.equal(response(messages3, 4).error.code, "timeout", "a camera that does n
 assert.match(response(messages3, 4).error.message, /did not answer/);
 assert.equal(response(messages3, 5).error.code, "unsupported");
 assert.ok(response(messages3, 6).result, "hello works at any time");
+for (const id of [7, 8, 9]) assert.equal(response(messages3, id).error.code, "unsupported", "AI methods are not implemented by OSC");
 console.log("camera plugin test passed");

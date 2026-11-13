@@ -3,3 +3,5 @@
 *.c text eol=lf
 Containerfile text eol=lf
 AppRun text eol=lf
+
+packaging/public-plugins.txt text eol=lf

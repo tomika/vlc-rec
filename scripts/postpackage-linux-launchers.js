@@ -1,6 +1,9 @@
 const fs = require("node:fs/promises");
 const path = require("node:path");
 
+const { assertPublicInputs } = require("./public-plugins");
+assertPublicInputs();
+
 const DIST_DIR = path.join(process.cwd(), "dist", "vlc-rec");
 const ICON_SRC = path.join(process.cwd(), "assets", "vlc-rec.png");
 const LINUX_BINARY_PREFIX = "vlc-rec-linux_";

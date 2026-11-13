@@ -172,6 +172,14 @@ function screenChecks(name, request) {
   const detail = `area=${area} saturated=${counts.saturated} black=${counts.black} magenta=${counts.magenta}`;
   const expect = request.expect;
   if (expect === "any") return [];
+  if (expect === "ai-border") {
+    const png = readPng(file);
+    let blue = 0;
+    for (let i = 0; i < png.pixels.length; i += png.channels) {
+      if (png.pixels[i] === 22 && png.pixels[i + 1] === 140 && png.pixels[i + 2] === 255) blue++;
+    }
+    return [{ name: "blue tracking edge is visible around native video", ok: blue >= 4 * (request.rect.width + request.rect.height), detail: `blue=${blue}` }];
+  }
   if (expect === "layout" || expect === "layout-idle") {
     // Stub mode: the stage around the video box is cyan, the box itself magenta, and
     // the player's black window must cover exactly the box: no magenta left, the cyan intact.
@@ -305,6 +313,11 @@ function prepareApp(scenario) {
       }
     }
   }
+  if (scenario === "camera-ai") {
+    const target = path.join(app, "player", "plugins", "camera-ai");
+    fs.cpSync(path.join(repo, "tests", "fixtures", "camera-ai"), target, { recursive: true });
+    fs.chmodSync(path.join(target, "run.sh"), 0o755);
+  }
   return { app, binary: path.join(app, binaryName) };
 }
 
@@ -316,7 +329,8 @@ async function runScenario(scenario, env) {
   const binary = APPIMAGE || plainBinary;
   const dir = path.join(app, "e2e");
   // E2E_PARAMS (a JSON object) is merged into the settings file of every scenario.
-  const params = { ...(scenario === "camera" ? { camera_plugin: "obsbot-tail2", camera_config: { host: "127.0.0.1" } } : {}), ...(process.env.E2E_PARAMS ? JSON.parse(process.env.E2E_PARAMS) : {}) };
+  const params = { ...(scenario === "camera" ? { camera_plugin: "osc", camera_config: { host: "127.0.0.1" } } : {}), ...(process.env.E2E_PARAMS ? JSON.parse(process.env.E2E_PARAMS) : {}) };
+  if (scenario === "camera-ai") Object.assign(params, { camera_plugin: "camera-ai" });
   if (Object.keys(params).length) fs.writeFileSync(path.join(app, "vlc_rec_params.json"), JSON.stringify(params));
   if (scenario === "camera") {
     startFakeCamera();
@@ -428,6 +442,7 @@ async function main() {
     await runScenario("main", baseEnv);
     await runScenario("aspect", baseEnv);
     await runScenario("camera", baseEnv);
+    await runScenario("camera-ai", baseEnv);
     await runScenario("motion", baseEnv);
     await runScenario("closewhile", baseEnv);
     await runScenario("hardkill", baseEnv);

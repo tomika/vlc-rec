@@ -228,6 +228,34 @@ const E2E_SCENARIO = "__SCENARIO__";
       return;
     }
 
+    if (E2E_SCENARIO === "camera-ai") {
+      await setWindow(1120, 630);
+      await waitFor("camera: AI adapter connected", () => cameraCan("trackStatus"));
+      await configure("camera-ai", "mkv", folder);
+      click(previewBtn);
+      await waitFor("camera: preview running", () => mode === "preview" && hasStats());
+      // Exercise real mouse input, adapter requests and status polling; never inject the AI state.
+      await waitFor("camera: initial AI status", () => cameraProc.aiEnabled === false);
+      let toggleCount = 0;
+      const doubleClick = async () => {
+        const r = videoHost.getBoundingClientRect();
+        await step(`input-ai-toggle-${++toggleCount}`, { action: "input", steps: [
+          { move: [Math.round(r.left + r.width / 2), Math.round(r.top + r.height / 2)], wait: 100 },
+          { click: 1, wait: 80 }, { click: 1, wait: 800 }
+        ] });
+      };
+      await doubleClick();
+      await waitFor("camera: polled tracking on", () => cameraProc.aiEnabled === true);
+      await shot("camera-ai-border", "ai-border", 500);
+      await doubleClick();
+      await waitFor("camera: polled tracking off", () => cameraProc.aiEnabled === false);
+      check("camera: AI border removed", !videoHost.classList.contains("ai-tracking"));
+      await stopAndWait("AI test stop");
+      await finish();
+      await Neutralino.app.exit();
+      return;
+    }
+
     if (E2E_SCENARIO === "camera") {
       // run-e2e.js starts a fake OSC camera and writes its address into the settings file, so
       // init() has started the camera adapter. Mouse and keys come through the X server, as a

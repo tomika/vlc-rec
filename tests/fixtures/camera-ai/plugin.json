@@ -1,0 +1,17 @@
+{
+  "interface": 1,
+  "id": "camera-ai",
+  "name": "Test camera",
+  "version": "1.0.0",
+  "command": {
+    "linux": [
+      "./run.sh"
+    ]
+  },
+  "config": [
+    {
+      "key": "host",
+      "type": "string"
+    }
+  ]
+}

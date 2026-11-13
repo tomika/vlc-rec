@@ -1,6 +1,6 @@
 /* Run in the Linux player builder: gcc -std=gnu11 tests/fixtures/camera-pose-test.c -lm -o /tmp/camera-pose-test && /tmp/camera-pose-test */
 #define main camera_plugin_main
-#include "../../plugins/obsbot-tail2/obsbot-tail2.c"
+#include "../../plugins/osc/osc.c"
 #undef main
 #include <assert.h>
 

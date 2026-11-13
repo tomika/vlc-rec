@@ -28,7 +28,7 @@ function harness() {
   // An element of the page; one that app.js makes (createElement) has the same parts, but is not in the page.
   const newElement = () => ({
     value: "", checked: false, hidden: true, style: {}, dataset: {}, attributes: {}, children: [],
-    classList: { names: new Set(), add(name) { this.names.add(name); }, remove(name) { this.names.delete(name); } },
+    classList: { names: new Set(), add(name) { this.names.add(name); }, remove(name) { this.names.delete(name); }, contains(name) { return this.names.has(name); } },
     addEventListener(name, handler) { this[name] = handler; },
     setAttribute(name, value) { this.attributes[name] = value; }, focus() {},
     replaceChildren(...children) { this.children = children; },
@@ -853,28 +853,44 @@ test("Windows RC statistics command reads a real TCP response and handles a clos
 // A camera adapter is a program that speaks JSON Lines. The harness plays it: the requests the app
 // wrote to its stdin are read back, and the answers come in through the process events.
 
-const pluginManifest = readFileSync(resolve(__dirname, "../plugins/obsbot-tail2/plugin.json"), "utf8");
+const pluginManifest = readFileSync(resolve(__dirname, "../plugins/osc/plugin.json"), "utf8");
 
 test("camera: discover adapters, select a sole adapter and offer multiple choices", async () => {
   const h = harness();
   putAdapter(h, "/app/player/plugins");
   putAdapter(h, "/app/plugins");
   await h.run("setupCameraPlugins()");
-  assert.equal(h.run("parameters.camera_plugin"), "obsbot-tail2");
+  assert.equal(h.run("parameters.camera_plugin"), "osc");
   assert.equal(h.elements.get("cameraPluginItem").hidden, true);
   const manifest = JSON.parse(pluginManifest);
   manifest.id = "another";
   manifest.name = "Another camera";
   h.files.set("/app/plugins/another/plugin.json", JSON.stringify(manifest));
-  h.files.set("/app/plugins/another/obsbot-tail2-win_x64.exe", 1);
+  h.files.set("/app/plugins/another/osc-win_x64.exe", 1);
   h.run('parameters.camera_plugin = ""');
   await h.run("setupCameraPlugins()");
   assert.equal(h.run("parameters.camera_plugin"), "");
   assert.equal(h.elements.get("cameraPluginItem").hidden, false);
   assert.equal(h.elements.get("cameraPluginSelect").children.length, 3);
+  h.run('parameters.camera_plugin = "osc"');
+  await h.run("setupCameraPlugins()");
+  assert.equal(h.elements.get("cameraPluginSelect").value, "osc");
+});
+
+test("camera: legacy public id migrates only when an external adapter with that id is absent", async () => {
+  const h = harness();
+  putAdapter(h, "/app/player/plugins");
   h.run('parameters.camera_plugin = "obsbot-tail2"');
   await h.run("setupCameraPlugins()");
-  assert.equal(h.elements.get("cameraPluginSelect").value, "obsbot-tail2");
+  assert.equal(h.run("parameters.camera_plugin"), "osc");
+  const external = JSON.parse(pluginManifest);
+  external.id = "obsbot-tail2";
+  h.files.set("/app/plugins/obsbot-tail2/plugin.json", JSON.stringify(external));
+  h.files.set("/app/plugins/obsbot-tail2/osc-win_x64.exe", 1);
+  h.run('parameters.camera_plugin = "obsbot-tail2"');
+  await h.run("setupCameraPlugins()");
+  assert.equal(h.run("parameters.camera_plugin"), "obsbot-tail2");
+  assert.equal(h.elements.get("cameraPluginItem").hidden, false);
 });
 
 const FULL_CAPS = {
@@ -885,14 +901,14 @@ const FULL_CAPS = {
 };
 
 function putAdapter(h, base) {
-  h.files.set(`${base}/obsbot-tail2/plugin.json`, pluginManifest);
-  h.files.set(`${base}/obsbot-tail2/obsbot-tail2-win_x64.exe`, 1);
+  h.files.set(`${base}/osc/plugin.json`, pluginManifest);
+  h.files.set(`${base}/osc/osc-win_x64.exe`, 1);
 }
 
 function cameraHarness() {
   const h = harness();
   putAdapter(h, "/app/player/plugins");
-  h.run('parameters.camera_plugin = "obsbot-tail2"; parameters.camera_config = { host: "192.168.1.50" }');
+  h.run('parameters.camera_plugin = "osc"; parameters.camera_config = { host: "192.168.1.50" }');
   return h;
 }
 
@@ -937,13 +953,13 @@ test("camera: the adapter is found by its manifest and started in its folder; th
   assert.equal(h.elements.get("cameraBar").hidden, true);
   await h.run("startCamera()");
   assert.equal(h.launches.length, 1);
-  assert.equal(h.launches[0], '"/app/player/plugins/obsbot-tail2/obsbot-tail2-win_x64.exe"');
-  assert.equal(h.spawnOptions[0].cwd, "/app/player/plugins/obsbot-tail2");
+  assert.equal(h.launches[0], '"/app/player/plugins/osc/osc-win_x64.exe"');
+  assert.equal(h.spawnOptions[0].cwd, "/app/player/plugins/osc");
   await flush();
   assert.deepEqual(cameraRequests(h).map((r) => r.method), ["hello"], "connect waits for the answer to hello");
   assert.deepEqual(cameraRequests(h)[0].params, { interface: 1, app: "vlc-rec" });
 
-  await cameraAnswers(h, "hello", { result: { interface: 1, plugin: { id: "obsbot-tail2" } } });
+  await cameraAnswers(h, "hello", { result: { interface: 1, plugin: { id: "osc" } } });
   // The manifest's defaults complete what the settings give.
   assert.deepEqual(cameraRequests(h, "connect")[0].params.config,
     { host: "192.168.1.50", hfov: 76, zoomRatio: 4.6, zoomMax: 36, nudgeSpeed: 30, oscPort: 57110, localPort: 57120 });
@@ -969,12 +985,12 @@ test("camera: no adapter chosen, an unknown or an unusable one leaves the featur
   assert.match(unknown.run("withCameraNote('')"), /adapter 'nope' was not found/);
 
   const badId = cameraHarness();
-  badId.run('parameters.camera_plugin = "../obsbot-tail2"');
+  badId.run('parameters.camera_plugin = "../osc"');
   await badId.run("startCamera()");
   assert.equal(badId.launches.length, 0);
 
   const noProgram = cameraHarness();
-  noProgram.files.delete("/app/player/plugins/obsbot-tail2/obsbot-tail2-win_x64.exe");
+  noProgram.files.delete("/app/player/plugins/osc/osc-win_x64.exe");
   await noProgram.run("startCamera()");
   assert.equal(noProgram.launches.length, 0, "no program for this system");
 
@@ -991,7 +1007,7 @@ test("camera: no adapter chosen, an unknown or an unusable one leaves the featur
     const h = cameraHarness();
     const manifest = JSON.parse(pluginManifest);
     edit(manifest);
-    h.files.set("/app/player/plugins/obsbot-tail2/plugin.json", JSON.stringify(manifest));
+    h.files.set("/app/player/plugins/osc/plugin.json", JSON.stringify(manifest));
     await h.run("startCamera()");
     assert.equal(h.launches.length, 0, JSON.stringify(manifest));
   }
@@ -1001,22 +1017,22 @@ test("camera: adapters are looked for in VLC_REC_PLUGIN_DIR, then in the setting
   const beside = cameraHarness();
   putAdapter(beside, "/app/plugins");
   await beside.run("startCamera()");
-  assert.match(beside.launches[0], /^"\/app\/plugins\/obsbot-tail2\//, "the settings folder is before the one beside the player");
+  assert.match(beside.launches[0], /^"\/app\/plugins\/osc\//, "the settings folder is before the one beside the player");
 
   const env = cameraHarness();
   putAdapter(env, "/app/plugins");
   putAdapter(env, "/custom");
   env.env.set("VLC_REC_PLUGIN_DIR", "/custom");
   await env.run("startCamera()");
-  assert.match(env.launches[0], /^"\/custom\/obsbot-tail2\//, "the variable is first");
+  assert.match(env.launches[0], /^"\/custom\/osc\//, "the variable is first");
 
   // The AppImage keeps its adapters in the image, where VLC_REC_PLAYER_DIR points.
   const image = harness();
-  image.run('parameters.camera_plugin = "obsbot-tail2"; parameters.camera_config = { host: "192.168.1.50" }');
+  image.run('parameters.camera_plugin = "osc"; parameters.camera_config = { host: "192.168.1.50" }');
   image.env.set("VLC_REC_PLAYER_DIR", "/image/player");
   putAdapter(image, "/image/player/plugins");
   await image.run("startCamera()");
-  assert.match(image.launches[0], /^"\/image\/player\/plugins\/obsbot-tail2\//);
+  assert.match(image.launches[0], /^"\/image\/player\/plugins\/osc\//);
 });
 
 test("camera: connect is asked again while the camera does not answer, unless the settings are wrong", async () => {
@@ -1094,6 +1110,134 @@ test("camera: the aspect ratio of the stream goes with the click", async () => {
   h.run("videoAspect = 4 / 3");
   h.run("handleVideoClick({ clientX: 650, clientY: 380 })");
   assert.deepEqual(cameraRequests(h, "ptz.centerOn").map((r) => r.params), [{ x: 1, y: 1, aspect: 1.3333 }]);
+});
+
+test("camera: a double click selects a person without turning on the first click", async () => {
+  const h = cameraHarness();
+  await connectCamera(h, { ...FULL_CAPS, ai: { trackPerson: true } });
+  await h.start(false);
+  h.run("handleVideoClick({ clientX: 170, clientY: 290, detail: 1 })");
+  h.run("handleVideoClick({ clientX: 170, clientY: 290, detail: 2 })");
+  h.run("handleVideoDoubleClick({ clientX: 170, clientY: 290 })");
+  h.fireTimer(300);
+  assert.equal(cameraRequests(h, "ptz.centerOn").length, 0);
+  assert.deepEqual(cameraRequests(h, "ai.trackPerson").map(r => r.params), [{ x: 0.25, y: 0.75 }]);
+  h.run("handleVideoClick({ clientX: 490, clientY: 200, detail: 1 })");
+  h.fireTimer(300);
+  assert.deepEqual(cameraRequests(h, "ptz.centerOn").map(r => r.params), [{ x: 0.75, y: 0.5, aspect: 1.7778 }]);
+  h.run("handleVideoDoubleClick({ clientX: 1000, clientY: 200 })");
+  assert.equal(cameraRequests(h, "ai.trackPerson").length, 1);
+});
+
+test("camera: double-click interval is configurable, saved with presets, and limits late clicks", async () => {
+  const h = cameraHarness();
+  await connectCamera(h, { ...FULL_CAPS, ai: { trackPerson: true } });
+  await h.start(false);
+  const field = h.elements.get("cameraClickDelay");
+  assert.equal(field.value, "300");
+  h.run('parameters.camera_presets = { "1": { pan: 10, tilt: 2 } }');
+  field.value = "150";
+  field.change();
+  await h.run("pendingParamsWrite");
+  const saved = JSON.parse(h.files.get("/app/vlc_rec_params.json"));
+  assert.equal(saved.camera_double_click_ms, 150);
+  assert.deepEqual(saved.camera_presets, { "1": { pan: 10, tilt: 2 } });
+  h.run("handleVideoClick({ clientX: 490, clientY: 200, detail: 1 })");
+  h.fireTimer(150);
+  h.run("handleVideoDoubleClick({ clientX: 490, clientY: 200 })");
+  assert.equal(cameraRequests(h, "ptz.centerOn").length, 1);
+  assert.equal(cameraRequests(h, "ai.trackPerson").length, 0);
+  field.value = "50";
+  field.change();
+  assert.equal(field.value, "100");
+  field.value = "5000";
+  field.change();
+  assert.equal(field.value, "1000");
+  field.value = "";
+  field.change();
+  assert.equal(field.value, "300");
+  await h.run("pendingParamsWrite");
+  h.files.set("/app/vlc_rec_params.json", JSON.stringify(saved));
+  await h.run("loadParams()");
+  h.run("showCameraPage()");
+  assert.equal(field.value, "150");
+  assert.equal(h.run("parameters.camera_presets['1'].pan"), 10);
+});
+
+test("camera: confirmed AI state draws a visible border and a double click stops tracking", async () => {
+  const h = cameraHarness();
+  await connectCamera(h, { ...FULL_CAPS, ai: { trackPerson: true, status: true, stop: true } });
+  await h.start(false);
+  await cameraAnswers(h, "ai.get", { result: { enabled: true } });
+  assert.equal(h.elements.get("videoHost").classList.contains("ai-tracking"), true);
+  assert.equal(h.run("videoRectArg()"), "14,24,632,352");
+  h.run("handleVideoClick({ clientX: 330, clientY: 200, detail: 1 })");
+  h.run("handleVideoDoubleClick({ clientX: 330, clientY: 200 })");
+  assert.equal(cameraRequests(h, "ai.stop").length, 1);
+  assert.equal(cameraRequests(h, "ai.trackPerson").length, 0);
+  await cameraAnswers(h, "ai.stop", { result: {} });
+  h.fireTimer(250);
+  await cameraAnswers(h, "ai.get", { result: { enabled: false } });
+  assert.equal(h.elements.get("videoHost").classList.contains("ai-tracking"), false);
+  assert.equal(h.run("videoRectArg()"), "10,20,640,360");
+  h.run("handleVideoClick({ clientX: 330, clientY: 200, detail: 1 })");
+  h.run("handleVideoDoubleClick({ clientX: 330, clientY: 200 })");
+  assert.equal(cameraRequests(h, "ai.trackPerson").length, 1);
+});
+
+test("camera: a preset stops AI before moving, and a failed stop prevents the move", async () => {
+  const caps = { ...FULL_CAPS, ptz: { ...FULL_CAPS.ptz, absolute: true }, ai: { trackPerson: true, status: true, stop: true } };
+  const h = cameraHarness();
+  await connectCamera(h, caps);
+  await cameraAnswers(h, "ai.get", { result: { enabled: true } });
+  h.run('parameters.camera_presets = { "1": { pan: 10, tilt: 2 } }');
+  h.run("applyPreset(1)");
+  assert.equal(cameraRequests(h, "ai.stop").length, 1);
+  assert.equal(cameraRequests(h, "ptz.moveTo").length, 0);
+  await cameraAnswers(h, "ai.stop", { result: {} });
+  assert.equal(cameraRequests(h, "ptz.moveTo").length, 0, "a sent UDP command is not yet confirmation");
+  await cameraAnswers(h, "ai.get", { result: { enabled: false } });
+  assert.deepEqual(cameraRequests(h, "ptz.moveTo").map(r => r.params), [{ pan: 10, tilt: 2 }]);
+
+  const fail = cameraHarness();
+  await connectCamera(fail, caps);
+  await cameraAnswers(fail, "ai.get", { result: { enabled: true } });
+  fail.run('parameters.camera_presets = { "1": { pan: 10, tilt: 2 } }');
+  fail.run("applyPreset(1)");
+  await cameraAnswers(fail, "ai.stop", { error: { code: "network", message: "stop failed" } });
+  assert.equal(cameraRequests(fail, "ptz.moveTo").length, 0);
+  assert.match(fail.run("withCameraNote('')"), /stop failed/);
+
+  const staysOn = cameraHarness();
+  await connectCamera(staysOn, caps);
+  await cameraAnswers(staysOn, "ai.get", { result: { enabled: true } });
+  staysOn.run('parameters.camera_presets = { "1": { pan: 10, tilt: 2 } }');
+  staysOn.run("applyPreset(1)");
+  await cameraAnswers(staysOn, "ai.stop", { result: {} });
+  for (let i = 0; i < 5; i++) await cameraAnswers(staysOn, "ai.get", { result: { enabled: true } });
+  assert.equal(cameraRequests(staysOn, "ptz.moveTo").length, 0);
+  assert.match(staysOn.run("withCameraNote('')"), /did not turn off AI/);
+});
+
+test("camera: a stale status reply cannot override a newer stop, and lost status hides the border", async () => {
+  const h = cameraHarness();
+  await connectCamera(h, { ...FULL_CAPS, ai: { trackPerson: true, status: true, stop: true } });
+  await h.start(false);
+  await cameraAnswers(h, "ai.get", { result: { enabled: true } });
+  h.run("refreshCameraAiState()");
+  await flush();
+  h.run("handleVideoClick({ clientX: 330, clientY: 200, detail: 1 })");
+  h.run("handleVideoDoubleClick({ clientX: 330, clientY: 200 })");
+  await cameraAnswers(h, "ai.stop", { result: {} });
+  await cameraAnswers(h, "ai.get", { result: { enabled: true } });
+  assert.equal(h.elements.get("videoHost").classList.contains("ai-tracking"), false);
+  h.fireTimer(250);
+  await cameraAnswers(h, "ai.get", { result: { enabled: false } });
+  assert.equal(h.elements.get("videoHost").classList.contains("ai-tracking"), false);
+  h.run("refreshCameraAiState()");
+  await cameraAnswers(h, "ai.get", { error: { code: "timeout", message: "offline" } });
+  assert.equal(h.run("cameraProc.aiEnabled"), null);
+  assert.equal(h.elements.get("videoHost").classList.contains("ai-tracking"), false);
 });
 
 test("camera: the controls follow what the adapter declares, and what it says later", async () => {
@@ -1387,7 +1531,7 @@ test("camera: choosing a scan result moves the camera to that address too, and r
   const noHost = cameraHarness();
   const manifest = JSON.parse(pluginManifest);
   manifest.config = [];
-  noHost.files.set("/app/player/plugins/obsbot-tail2/plugin.json", JSON.stringify(manifest));
+  noHost.files.set("/app/player/plugins/osc/plugin.json", JSON.stringify(manifest));
   await noHost.run('applySelectedAddress("192.168.1.77:5000")');
   assert.equal(noHost.launches.length, 0);
   assert.equal(noHost.run("parameters.camera_config.host"), "192.168.1.50");
@@ -1581,14 +1725,14 @@ test("camera: the waiting after a click follows the duration the adapter reports
   assert.equal(turns(), 2);
 });
 
-test("camera: settings of earlier builds become the config of the obsbot-tail2 adapter", async () => {
+test("camera: settings of earlier builds become the config of the osc adapter", async () => {
   const h = harness();
   h.files.set("/app/vlc_rec_params.json", JSON.stringify({
     ip_address: "10.0.0.5:5000", camera_ip: "192.168.1.50", camera_hfov_deg: 80, camera_zoom_max: 36,
     camera_zoom_ratio: 5, camera_arrow_speed: 20, camera_turn_speed: 25, camera_zoom_step: 4, camera_arrow_step_deg: 3
   }));
   await h.run("loadParams()");
-  assert.equal(h.run("parameters.camera_plugin"), "obsbot-tail2");
+  assert.equal(h.run("parameters.camera_plugin"), "osc");
   assert.equal(h.run("JSON.stringify(parameters.camera_config)"),
     JSON.stringify({ host: "192.168.1.50", hfov: 80, zoomRatio: 5, zoomMax: 36, nudgeSpeed: 20 }));
   assert.equal(h.run("parameters.camera_zoom_step"), 11, "4 of 36 units is 11 percent of the range");

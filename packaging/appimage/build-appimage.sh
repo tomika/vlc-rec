@@ -44,13 +44,14 @@ cp "$REPO/dist/vlc-rec/vlc-rec-linux_x64" "$USR/bin/vlc-rec"
 cp "$REPO/player/vlc-rec-player-linux_x64" "$USR/player/"
 # Camera adapters (optional; the app has no camera controls without one): the manifest and the Linux
 # program of each, where the app looks for them, in plugins beside the player.
-for dir in "$REPO"/player/plugins/*/; do
-  id=$(basename "$dir")
-  if [ -f "${dir}plugin.json" ] && [ -f "${dir}${id}-linux_x64" ]; then
-    mkdir -p "$USR/player/plugins/$id"
-    cp "${dir}plugin.json" "${dir}${id}-linux_x64" "$USR/player/plugins/$id/"
-  fi
-done
+while IFS= read -r id || [ -n "$id" ]; do
+  [ -n "$id" ] || continue
+  case "$id" in *[!a-z0-9_-]*) echo "Invalid public plugin id" >&2; exit 1 ;; esac
+  dir="$REPO/player/plugins/$id"
+  test -f "$dir/plugin.json" && test -f "$dir/$id-linux_x64"
+  mkdir -p "$USR/player/plugins/$id"
+  cp "$dir/plugin.json" "$dir/$id-linux_x64" "$USR/player/plugins/$id/"
+done < "$REPO/packaging/public-plugins.txt"
 cp /usr/bin/vlc /usr/bin/zenity "$USR/bin/"
 cp -rL "$SYSTEM_LIB/vlc/plugins" "$LIB/vlc/plugins"
 cp -rL "$SYSTEM_LIB/gdk-pixbuf-2.0/2.10.0/loaders" "$LIB/gdk-pixbuf-loaders"

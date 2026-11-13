@@ -3,6 +3,7 @@ const { spawnSync } = require("node:child_process");
 const path = require("node:path");
 
 const root = path.resolve(__dirname, "..");
+require("./public-plugins").assertPublicInputs(root);
 const IMAGE = "localhost/vlc-rec-appimage-builder:1";
 const NEEDED = ["dist/vlc-rec/vlc-rec-linux_x64", "player/vlc-rec-player-linux_x64"];
 

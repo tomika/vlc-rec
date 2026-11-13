@@ -45,7 +45,7 @@ if (!fs.existsSync(appImage)) {
 const settings = JSON.stringify({
   ip_address: stream || "127.0.0.1:5000",
   output_path: "/tmp/recordings",
-  ...(camera ? { camera_plugin: "obsbot-tail2", camera_config: { host: camera } } : {})
+  ...(camera ? { camera_plugin: "osc", camera_config: { host: camera } } : {})
 });
 // The settings go in as an environment variable, never into the shell text.
 const script = [

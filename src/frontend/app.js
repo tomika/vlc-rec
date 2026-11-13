@@ -44,6 +44,9 @@ const cameraPage = document.getElementById("cameraPage");
 const cameraAddressText = document.getElementById("cameraAddressText");
 const cameraPageBtn = document.getElementById("cameraPageBtn");
 const cameraHintText = document.getElementById("cameraHint");
+const cameraClickDelay = document.getElementById("cameraClickDelay");
+const cameraClickDelayRow = document.getElementById("cameraClickDelayRow");
+const cameraClickDelayHint = document.getElementById("cameraClickDelayHint");
 const cameraZoomItem = document.getElementById("cameraZoomItem");
 const cameraSpeedItem = document.getElementById("cameraSpeedItem");
 const presetBar = document.getElementById("presetBar");
@@ -69,6 +72,7 @@ const DEFAULT_PARAMS = {
   camera_turn_speed: 10,
   camera_zoom_step: 10,
   camera_arrow_step_deg: 2,
+  camera_double_click_ms: 300,
   // Camera presets 1 to 9: { "1": { pan, tilt, zoom }, ... }. A preset has a position (pan and tilt in degrees),
   // a zoom (0..1 of the range of the camera), or both. The keys 1 to 9 apply one, Alt+number teaches it.
   camera_presets: {},
@@ -565,7 +569,7 @@ async function pathExists(path) {
 }
 
 // Earlier builds named an OBSBOT camera by camera_ip and kept its tuning in camera_* keys of their own.
-// Those became the config of the obsbot-tail2 adapter; the zoom step was in the camera's units and is now
+// Those became the config of the OSC adapter; the zoom step was in the camera's units and is now
 // a percent of the zoom range.
 function migrateCameraSettings(loaded) {
   if (!loaded || typeof loaded !== "object" || !Object.prototype.hasOwnProperty.call(loaded, "camera_ip")) return loaded;
@@ -573,7 +577,7 @@ function migrateCameraSettings(loaded) {
   const host = String(out.camera_ip || "").trim();
   const zoomMax = numberParam(out.camera_zoom_max, 36, 1, 100);
   if (host && !out.camera_plugin) {
-    out.camera_plugin = "obsbot-tail2";
+    out.camera_plugin = "osc";
     out.camera_config = {
       host,
       hfov: numberParam(out.camera_hfov_deg, 76, 10, 170),
@@ -1198,6 +1202,8 @@ function cameraCan(feature) {
     case "nudge": return Boolean(ptz.nudge);
     case "speed": return Boolean(ptz.speed && typeof ptz.speed === "object");
     case "zoom": return Boolean(caps.zoom && caps.zoom.by);
+    case "trackPerson": return Boolean(caps.ai && caps.ai.trackPerson);
+    case "trackStatus": return Boolean(caps.ai && caps.ai.status && caps.ai.stop);
     // Absolute moves: the camera tells where it points (ptz.get, zoom.get) and goes there (ptz.moveTo, zoom.set).
     case "moveTo": return Boolean(ptz.absolute);
     case "zoomSet": return Boolean(caps.zoom && caps.zoom.absolute);
@@ -1233,6 +1239,7 @@ function cameraLabel() {
 function cameraHint() {
   const parts = [];
   if (cameraCan("centerOn")) parts.push("Click the picture to centre it.");
+  if (cameraCan("trackPerson")) parts.push("Double-click a person to follow them.");
   if (cameraCan("zoom")) parts.push("Mouse wheel: zoom.");
   if (cameraCan("nudge")) parts.push("Arrow keys: turn (Shift: larger steps).");
   if (presetsAvailable()) {
@@ -1251,6 +1258,21 @@ function showCameraPage() {
   cameraAddressText.textContent = label;
   cameraPageBtn.hidden = !url;
   cameraHintText.textContent = hint;
+  cameraClickDelayRow.hidden = cameraClickDelayHint.hidden = !cameraCan("trackPerson");
+  if (document.activeElement !== cameraClickDelay) cameraClickDelay.value = String(cameraDoubleClickMs());
+}
+
+function cameraDoubleClickMs() {
+  return Math.round(numberParam(parameters.camera_double_click_ms, DEFAULT_PARAMS.camera_double_click_ms, 100, 1000));
+}
+
+function handleCameraClickDelayChange() {
+  const typed = Number(cameraClickDelay.value);
+  parameters.camera_double_click_ms = cameraClickDelay.value !== "" && Number.isFinite(typed)
+    ? Math.max(100, Math.min(1000, Math.round(typed))) : DEFAULT_PARAMS.camera_double_click_ms;
+  cameraClickDelay.value = String(parameters.camera_double_click_ms);
+  saveParams(parameters.ip_address, parameters.output_path, parameters.output_filename)
+    .catch((err) => logDebug(`Could not save the double-click interval: ${normalizeError(err)}`));
 }
 
 async function openCameraPage() {
@@ -1312,6 +1334,10 @@ async function setupCameraPlugins() {
   const plugins = await discoverCameraPlugins();
   const selected = String(parameters.camera_plugin || "").trim();
   if (!selected && plugins.length === 1) parameters.camera_plugin = plugins[0].id;
+  // The original public OSC adapter used this model-specific id. Keep an installed
+  // external adapter with that id; otherwise migrate to the bundled OSC implementation.
+  if (selected === "obsbot-tail2" && !plugins.some((plugin) => plugin.id === selected) &&
+      plugins.some((plugin) => plugin.id === "osc")) parameters.camera_plugin = "osc";
   cameraPluginItem.hidden = plugins.length < 2;
   const options = [];
   if (!parameters.camera_plugin || !plugins.some((plugin) => plugin.id === parameters.camera_plugin)) {
@@ -1494,6 +1520,7 @@ async function connectCamera(proc) {
 function applyCameraCapabilities(proc, caps) {
   proc.caps = caps && typeof caps === "object" ? caps : {};
   showCameraControls();
+  if (cameraCan("trackStatus")) refreshCameraAiState(proc);
   // The speed is the app's setting, not the adapter's.
   if (cameraCan("speed")) sendCameraRequest("ptz.setSpeed", { value: cameraTurnSpeed() });
 }
@@ -1513,8 +1540,74 @@ function showCameraControls() {
     showCameraSpeed();
   }
   showCameraPage();
+  updateAiIndicator();
   renderPresets();
   updateLayout();
+}
+
+function updateAiIndicator() {
+  const active = Boolean(cameraCan("trackStatus") && cameraProc.aiEnabled === true);
+  if (active) videoHost.classList.add("ai-tracking");
+  else videoHost.classList.remove("ai-tracking");
+  syncPlayerRect();
+}
+
+async function refreshCameraAiState(proc = cameraProc) {
+  if (!proc || proc !== cameraProc || !cameraCan("trackStatus") || proc.aiPolling || proc.aiBusy) return;
+  const revision = proc.aiRevision || 0;
+  proc.aiPolling = true;
+  try {
+    const result = await cameraRequest(proc, "ai.get");
+    if (cameraProc !== proc || proc.aiBusy || revision !== (proc.aiRevision || 0)) return;
+    if (typeof result.enabled !== "boolean") throw new Error("invalid AI status");
+    if (proc.aiEnabled !== result.enabled || proc.aiStateError) logDebug(`Camera AI tracking: ${result.enabled ? "on" : "off"}.`);
+    proc.aiStateError = "";
+    proc.aiEnabled = result.enabled;
+  } catch (err) {
+    if (cameraProc !== proc || proc.aiBusy || revision !== (proc.aiRevision || 0)) return;
+    const error = normalizeError(err);
+    if (proc.aiStateError !== error) logDebug(`Camera AI status unavailable: ${error}`);
+    proc.aiStateError = error;
+    proc.aiEnabled = null;
+  } finally {
+    proc.aiPolling = false;
+    if (cameraProc === proc) updateAiIndicator();
+  }
+}
+
+async function runCameraAiAction(method, params = {}, verifyStopped = false) {
+  const proc = cameraProc;
+  if (!proc || !cameraCan("trackStatus")) return false;
+  if (proc.aiBusy) {
+    setCameraNote("the previous AI tracking request is still in progress.");
+    return false;
+  }
+  proc.aiBusy = true;
+  proc.aiRevision = (proc.aiRevision || 0) + 1;
+  try {
+    await cameraRequest(proc, method, params);
+    if (cameraProc !== proc || proc.exited || !proc.caps) return false;
+    if (verifyStopped) {
+      let stopped = false;
+      for (let i = 0; i < 5; i++) {
+        const status = await cameraRequest(proc, "ai.get");
+        if (cameraProc !== proc || proc.exited || !proc.caps) return false;
+        if (status.enabled === false) { stopped = true; break; }
+        if (status.enabled !== true) throw cameraError("device_error", "the camera returned an invalid AI status.");
+        if (i < 4) await new Promise((resolve) => setTimeout(resolve, 200));
+      }
+      if (!stopped) throw cameraError("device_error", "the camera did not turn off AI tracking.");
+    }
+    proc.aiEnabled = verifyStopped ? false : null;
+    updateAiIndicator();
+    return true;
+  } catch (err) {
+    if (err.code !== "stopped") setCameraNote(err.message);
+    return false;
+  } finally {
+    proc.aiBusy = false;
+    if (cameraProc === proc) setTimeout(() => refreshCameraAiState(proc), 250);
+  }
 }
 
 function stopCamera() {
@@ -1609,6 +1702,8 @@ function handleCameraMessage(proc, message) {
   if (message.event === "capabilities") applyCameraCapabilities(proc, message.capabilities);
   if (message.event === "state" && (message.state === "lost" || message.state === "error")) {
     // The camera is gone; the controls go until the adapter says it is back (a capabilities event).
+    proc.aiRevision = (proc.aiRevision || 0) + 1;
+    proc.aiEnabled = null;
     proc.caps = null;
     showCameraControls();
     setCameraNote(String(message.reason || "the camera is not reachable."));
@@ -1670,10 +1765,49 @@ function zoomCamera(delta) {
   sendCameraRequest("zoom.by", { delta: delta / 100 });
 }
 
-function handleVideoClick(evt) {
+let videoClickGeneration = 0;
+let videoClickPending = null;
+function videoPoint(evt) {
   const rect = videoHost.getBoundingClientRect();
-  if (!(rect.width > 0 && rect.height > 0)) return;
-  turnCameraTo((evt.clientX - rect.left) / rect.width, (evt.clientY - rect.top) / rect.height);
+  if (!(rect.width > 0 && rect.height > 0)) return null;
+  const inset = videoHost.classList.contains("ai-tracking") ? 4 : 0;
+  if (rect.width <= inset * 2 || rect.height <= inset * 2) return null;
+  const x = (evt.clientX - rect.left - inset) / (rect.width - inset * 2), y = (evt.clientY - rect.top - inset) / (rect.height - inset * 2);
+  return x >= 0 && x <= 1 && y >= 0 && y <= 1 ? { x, y } : null;
+}
+
+function handleVideoClick(evt) {
+  const point = videoPoint(evt);
+  if (!point || evt.detail > 1) return;
+  if (!cameraCan("trackPerson")) return turnCameraTo(point.x, point.y);
+  const generation = ++videoClickGeneration, proc = cameraProc, video = currentProcess;
+  videoClickPending = { proc, video };
+  setTimeout(() => {
+    if (generation === videoClickGeneration) {
+      videoClickPending = null;
+      if (proc === cameraProc && video === currentProcess)
+        turnCameraTo(point.x, point.y);
+    }
+  }, cameraDoubleClickMs());
+}
+
+function handleVideoDoubleClick(evt) {
+  const pending = videoClickPending;
+  videoClickPending = null;
+  ++videoClickGeneration;
+  if (!pending || pending.proc !== cameraProc || pending.video !== currentProcess ||
+      !cameraCan("trackPerson") || mode === "idle" || !scanDialog.hidden) return;
+  const point = videoPoint(evt);
+  if (!point) return;
+  const params = { x: Number(point.x.toFixed(4)), y: Number(point.y.toFixed(4)) };
+  if (!cameraCan("trackStatus")) return sendCameraRequest("ai.trackPerson", params);
+  const proc = cameraProc;
+  if (proc.aiEnabled === null || proc.aiEnabled === undefined) {
+    setCameraNote("AI tracking status is not available yet.");
+    refreshCameraAiState(proc);
+    return;
+  }
+  runCameraAiAction(proc.aiEnabled ? "ai.stop" : "ai.trackPerson", params);
 }
 
 // A wheel notch is half a button step. Wheel up zooms in.
@@ -1834,13 +1968,20 @@ function savePresets() {
     .catch((err) => setCameraNote(`could not save presets: ${normalizeError(err)}`));
 }
 
-function applyPreset(slot) {
+async function applyPreset(slot) {
   if (!presetsAvailable()) return;
   const preset = presetOf(slot);
   if (!preset) {
     setCameraNote(`preset ${slot} is empty; Alt+${slot} teaches it.`);
     return;
   }
+  const canMove = preset.pan !== undefined && cameraCan("moveTo");
+  const canZoom = preset.zoom !== undefined && cameraCan("zoomSet");
+  if (!canMove && !canZoom) {
+    setCameraNote(`this camera cannot apply preset ${slot}.`);
+    return;
+  }
+  if (cameraCan("trackStatus") && !await runCameraAiAction("ai.stop", {}, true)) return;
   let sent = false;
   if (preset.pan !== undefined && cameraCan("moveTo")) {
     sendCameraRequest("ptz.moveTo", { pan: preset.pan, tilt: preset.tilt });
@@ -2037,7 +2178,8 @@ function handleWindowPointerDown(evt) {
 function videoRectArg() {
   const rect = videoHost.getBoundingClientRect();
   const scale = window.devicePixelRatio || 1;
-  return [rect.left, rect.top, rect.width, rect.height].map((value) => Math.round(value * scale)).join(",");
+  const inset = videoHost.classList.contains("ai-tracking") ? 4 : 0;
+  return [rect.left + inset, rect.top + inset, Math.max(0, rect.width - inset * 2), Math.max(0, rect.height - inset * 2)].map((value) => Math.round(value * scale)).join(",");
 }
 
 // What the user types is limited only to what VLC takes. How small a buffer can be without freezing the
@@ -3097,6 +3239,7 @@ async function init() {
       await refreshState();
     })().catch((err) => logDebug(`Stream monitor: ${normalizeError(err)}`));
   }, 1000);
+  setInterval(() => refreshCameraAiState(), 2000);
 }
 
 autoReconnect.addEventListener("change", () => {
@@ -3230,11 +3373,13 @@ scanDialog.addEventListener("click", (evt) => {
 // The native video window may or may not pass mouse input on to the page, depending on the
 // platform; both are plain page events here.
 videoHost.addEventListener("click", handleVideoClick);
+videoHost.addEventListener("dblclick", handleVideoDoubleClick);
 stage.addEventListener("wheel", handleStageWheel, { passive: false });
 zoomInBtn.addEventListener("click", () => zoomCamera(cameraZoomStep()));
 zoomOutBtn.addEventListener("click", () => zoomCamera(-cameraZoomStep()));
 cameraPluginSelect.addEventListener("change", () => selectCameraPlugin().catch((err) => setCameraNote(normalizeError(err))));
 cameraPageBtn.addEventListener("click", () => openCameraPage().catch(() => {}));
+cameraClickDelay.addEventListener("change", handleCameraClickDelayChange);
 cameraSpeed.addEventListener("input", handleCameraSpeedInput);
 cameraSpeed.addEventListener("change", handleCameraSpeedChange);
 // A slider that keeps the focus would take the arrow keys, which turn the camera.

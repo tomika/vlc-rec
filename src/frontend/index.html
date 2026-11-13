@@ -89,6 +89,12 @@
           </div>
           <!-- The camera presets while settings are open. -->
           <div id="presetDrawer" class="preset-row" role="group" aria-label="Camera presets" hidden></div>
+          <label id="cameraClickDelayRow" class="buffer-option" hidden>
+            Double-click interval
+            <input id="cameraClickDelay" class="text-input buffer-input" type="number" min="100" max="1000" step="10" aria-describedby="cameraClickDelayHint" />
+            ms
+          </label>
+          <p id="cameraClickDelayHint" class="drawer-hint" hidden>A shorter interval makes single-click turns faster, but double-clicks must be quicker too.</p>
           <p id="cameraHint" class="drawer-hint"></p>
         </div>
       </section>
