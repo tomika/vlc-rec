@@ -6,6 +6,7 @@
  *
  * Arguments (all ASCII; text values are hex encoded UTF-8 so no shell or
  * code page can damage them):
+ *   --rect-scale N   browser devicePixelRatio (Windows, default 1)
  *   --parent-pid N   process id owning the application window (required)
  *   --url-hex H      stream URL (required)
  *   --rect X,Y,W,H   video area in physical pixels, relative to the client area
@@ -17,7 +18,8 @@
  *                    which delays the picture by about that much. Lower it for a picture that
  *                    steers something; too low makes a jittery link stutter
  *
- * stdin, one command per line: RECT X,Y,W,H | HIDE | SHOW | STOP
+ * stdin, one command per line: RECT X,Y,W,H [scale] | HIDE | SHOW | STOP
+ * Windows scale is browser devicePixelRatio; omission retains the previous value.
  * Commands are case-insensitive and unknown lines are ignored, so "stop" works.
  * End of stdin also means STOP, so the player cannot outlive the app.
  *
@@ -157,6 +159,21 @@ static int g_rect[4] = {0, 0, 640, 360};
 
 #ifdef _WIN32
 static HWND g_child = NULL;
+static HWND g_window_host = NULL;
+static double g_rect_scale = 1.0, g_pending_scale = 1.0;
+static int g_pending_rect[4];
+static CRITICAL_SECTION g_window_lock;
+static void *g_dpi_context = NULL;
+#define WM_PLAYER_RECT (WM_APP + 1)
+#define WM_PLAYER_SHOW (WM_APP + 2)
+
+typedef void *(WINAPI *dpi_window_t)(HWND);
+typedef void *(WINAPI *dpi_thread_t)(void *);
+static void match_dpi_thread(void)
+{
+    dpi_thread_t set = (dpi_thread_t)(void *)GetProcAddress(GetModuleHandleW(L"user32.dll"), "SetThreadDpiAwarenessContext");
+    if (set && g_dpi_context) set(g_dpi_context);
+}
 static DWORD g_main_thread = 0;
 static CRITICAL_SECTION g_out_lock;
 #define OUT_LOCK() EnterCriticalSection(&g_out_lock)
@@ -450,8 +467,47 @@ static BOOL CALLBACK find_window_cb(HWND hwnd, LPARAM param)
     return TRUE;
 }
 
+/* Prefer the browser's input window. A disabled video child then gives input
+ * directly to WebView2, rather than to its sibling's Neutralino frame. */
+static BOOL CALLBACK find_browser_cb(HWND hwnd, LPARAM param)
+{
+    wchar_t name[128];
+    GetClassNameW(hwnd, name, 128);
+    if (IsWindowVisible(hwnd) && wcscmp(name, L"Chrome_RenderWidgetHostHWND") == 0) {
+        *(HWND *)param = hwnd;
+        return FALSE;
+    }
+    return TRUE;
+}
+
+static void apply_window_rect(const int rect[4], double scale)
+{
+    typedef UINT(WINAPI *get_dpi_t)(HWND);
+    get_dpi_t get_dpi = (get_dpi_t)(void *)GetProcAddress(GetModuleHandleW(L"user32.dll"), "GetDpiForWindow");
+    HWND parent = GetParent(g_child);
+    UINT dpi = get_dpi ? get_dpi(parent) : 96;
+    double factor = (dpi ? dpi : 96) / (96.0 * scale);
+    POINT origin = {0, 0};
+    MapWindowPoints(g_window_host, parent, &origin, 1);
+    SetWindowPos(g_child, HWND_TOP, origin.x + (int)(rect[0] * factor + 0.5),
+                 origin.y + (int)(rect[1] * factor + 0.5),
+                 (int)(rect[2] * factor + 0.5), (int)(rect[3] * factor + 0.5), SWP_NOACTIVATE);
+}
+
 static LRESULT CALLBACK child_proc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp)
 {
+    if (msg == WM_PLAYER_RECT) {
+        int rect[4]; double scale;
+        EnterCriticalSection(&g_window_lock);
+        memcpy(rect, g_pending_rect, sizeof rect); scale = g_pending_scale;
+        LeaveCriticalSection(&g_window_lock);
+        apply_window_rect(rect, scale);
+        return 0;
+    }
+    if (msg == WM_PLAYER_SHOW) {
+        ShowWindow(hwnd, wp ? SW_SHOWNOACTIVATE : SW_HIDE);
+        return 0;
+    }
     return DefWindowProcW(hwnd, msg, wp, lp);
 }
 
@@ -467,6 +523,20 @@ static int window_create(void)
         return 0;
     }
 
+    g_window_host = ctx.best;
+    HWND browser = NULL;
+    EnumChildWindows(ctx.best, find_browser_cb, (LPARAM)&browser);
+    HWND parent = browser ? browser : ctx.best;
+    dpi_window_t get_context = (dpi_window_t)(void *)GetProcAddress(GetModuleHandleW(L"user32.dll"), "GetWindowDpiAwarenessContext");
+    if (get_context) g_dpi_context = get_context(parent);
+    typedef BOOL(WINAPI *dpi_process_t)(void *);
+    dpi_process_t set_process = (dpi_process_t)(void *)GetProcAddress(GetModuleHandleW(L"user32.dll"), "SetProcessDpiAwarenessContext");
+    if (set_process && g_dpi_context) set_process(g_dpi_context);
+    match_dpi_thread();
+    InitializeCriticalSection(&g_window_lock);
+    memcpy(g_pending_rect, g_rect, sizeof g_rect);
+    g_pending_scale = g_rect_scale;
+
     WNDCLASSW wc;
     memset(&wc, 0, sizeof wc);
     wc.lpfnWndProc = child_proc;
@@ -479,23 +549,27 @@ static int window_create(void)
     g_child = CreateWindowExW(0, wc.lpszClassName, L"",
                               WS_CHILD | WS_VISIBLE | WS_CLIPCHILDREN | WS_CLIPSIBLINGS | WS_DISABLED,
                               g_rect[0], g_rect[1], g_rect[2], g_rect[3],
-                              ctx.best, NULL, wc.hInstance, NULL);
+                              parent, NULL, wc.hInstance, NULL);
     if (!g_child) {
         emit_error("window-create", "CreateWindowEx failed with code %lu.", GetLastError());
         return 0;
     }
-    SetWindowPos(g_child, HWND_TOP, 0, 0, 0, 0, SWP_NOMOVE | SWP_NOSIZE | SWP_NOACTIVATE);
+    apply_window_rect(g_rect, g_rect_scale);
     return 1;
 }
 
 static void window_set_rect(const int r[4])
 {
-    SetWindowPos(g_child, HWND_TOP, r[0], r[1], r[2], r[3], SWP_NOACTIVATE | SWP_ASYNCWINDOWPOS);
+    EnterCriticalSection(&g_window_lock);
+    memcpy(g_pending_rect, r, sizeof g_pending_rect);
+    g_pending_scale = g_rect_scale;
+    LeaveCriticalSection(&g_window_lock);
+    PostMessageW(g_child, WM_PLAYER_RECT, 0, 0);
 }
 
 static void window_show(int show)
 {
-    ShowWindowAsync(g_child, show ? SW_SHOWNOACTIVATE : SW_HIDE);
+    PostMessageW(g_child, WM_PLAYER_SHOW, (WPARAM)show, 0);
 }
 
 static int parent_alive(void)
@@ -652,7 +726,13 @@ static void handle_command(char *line)
         window_show(1);
     } else if (strncmp(line, "RECT ", 5) == 0) {
         int rect[4];
-        if (parse_rect(line + 5, rect)) window_set_rect(rect);
+        if (parse_rect(line + 5, rect)) {
+#ifdef _WIN32
+            double scale;
+            if (sscanf(line + 5, "%*d,%*d,%*d,%*d %lf", &scale) == 1 && scale > 0 && scale <= 8) g_rect_scale = scale;
+#endif
+            window_set_rect(rect);
+        }
     }
 }
 
@@ -734,6 +814,11 @@ static int run_player(void)
     /* With a log callback libVLC's messages become "log" events; without one they are silenced. */
     const char *args[24] = {"--stats", "--no-video-title-show", "--no-osd", vlc.log_set ? "--verbose=0" : "--quiet"};
     int argc = 4;
+#ifdef _WIN32
+    args[argc++] = "--embedded-video";
+    args[argc++] = "--no-fullscreen";
+    args[argc++] = "--no-video-on-top";
+#endif
     const char *extra_env = getenv("VLC_REC_VLC_ARGS");
     char *extra = extra_env ? strdup(extra_env) : NULL;
     if (extra) {
@@ -851,6 +936,7 @@ static volatile int g_exit_code = 0;
 static unsigned __stdcall player_thread(void *arg)
 {
     (void)arg;
+    match_dpi_thread();
     g_exit_code = run_player();
     PostThreadMessageW(g_main_thread, WM_QUIT, 0, 0);
     return 0;
@@ -882,17 +968,16 @@ int main(int argc, char **argv)
         else if (strcmp(argv[i], "--caching") == 0) g_caching = atoi(argv[i + 1]);
         else if (strcmp(argv[i], "--srt-latency") == 0) g_srt_latency = atoi(argv[i + 1]);
         else if (strcmp(argv[i], "--rect") == 0) parse_rect(argv[i + 1], g_rect);
+#ifdef _WIN32
+        else if (strcmp(argv[i], "--rect-scale") == 0) {
+            double scale = atof(argv[i + 1]);
+            if (scale > 0 && scale <= 8) g_rect_scale = scale;
+        }
+#endif
     }
 #ifdef _WIN32
     InitializeCriticalSection(&g_out_lock);
     g_main_thread = GetCurrentThreadId();
-    /* Match the per-monitor awareness of WebView2 so pixels mean the same on both sides. */
-    {
-        typedef BOOL(WINAPI * set_ctx_t)(void *);
-        set_ctx_t set_ctx = (set_ctx_t)(void *)GetProcAddress(GetModuleHandleW(L"user32.dll"),
-                                                              "SetProcessDpiAwarenessContext");
-        if (set_ctx) set_ctx((void *)(LONG_PTR)-4);
-    }
 #else
     XInitThreads();
 #endif

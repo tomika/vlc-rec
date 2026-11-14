@@ -271,7 +271,7 @@ const E2E_SCENARIO = "__SCENARIO__";
       const at = (fx, fy) => [Math.round(host.left + host.width * fx), Math.round(host.top + host.height * fy)];
       await step("input-click", { action: "input", steps: [{ move: at(0.75, 0.5), wait: 300 }, { click: 1, wait: 800 }] });
       await step("input-wheel", { action: "input", steps: [{ move: at(0.5, 0.5), wait: 200 }, { wheel: "up", wait: 400 }] });
-      await step("input-keys", { action: "input", steps: [{ key: "Right", wait: 400 }, { key: "Up", wait: 400 }] });
+      await step("input-keys", { action: "input", steps: [{ keydown: "Right", wait: 700 }, { keyup: "Right", wait: 200 }, { keydown: "Up", wait: 700 }, { keyup: "Up", wait: 200 }] });
       const reply = await step("camera-verify", { action: "camera-verify" });
       for (const item of reply.checks) check(`camera: ${item.name}`, item.ok, item.detail);
       // The camera controls are a block of their own: the zoom buttons and the speed slider with its
@@ -451,7 +451,7 @@ const E2E_SCENARIO = "__SCENARIO__";
 
       // Away from the taught pose and zoom, then the number brings the camera back.
       const taughtTurn = (preset) => [-Math.round(preset.pan), -Math.round(preset.tilt)];
-      await step("input-preset-away", { action: "input", steps: [{ key: "Right", wait: 400 }, { key: "Right", wait: 400 }, { key: "Up", wait: 400 }, { move: centre(), wait: 100 }, { wheel: "up", wait: 800 }] });
+      await step("input-preset-away", { action: "input", steps: [{ keydown: "Right", wait: 700 }, { keyup: "Right", wait: 200 }, { keydown: "Up", wait: 700 }, { keyup: "Up", wait: 200 }, { move: centre(), wait: 100 }, { wheel: "up", wait: 800 }] });
       let was = await commands("preset-state-1");
       await step("input-preset-apply-1", { action: "input", steps: [{ key: "1", wait: 2000 }] });
       let now = await commands("preset-state-2");
@@ -462,7 +462,7 @@ const E2E_SCENARIO = "__SCENARIO__";
       check("presets: and set the taught zoom", now.zooms.length === was.zooms.length + 1 && now.zooms.at(-1) === Math.round(taught[1].zoom * 36), `zoom ${now.zooms.at(-1)}, taught ${taught[1].zoom * 36}`);
 
       // A position preset turns only; a zoom preset zooms only.
-      await step("input-preset-away-2", { action: "input", steps: [{ key: "Left", wait: 400 }, { key: "Left", wait: 400 }, { move: centre(), wait: 100 }, { wheel: "up", wait: 800 }] });
+      await step("input-preset-away-2", { action: "input", steps: [{ keydown: "Left", wait: 700 }, { keyup: "Left", wait: 200 }, { move: centre(), wait: 100 }, { wheel: "up", wait: 800 }] });
       was = await commands("preset-state-3");
       await step("input-preset-apply-2", { action: "input", steps: [{ key: "2", wait: 2000 }] });
       now = await commands("preset-state-4");

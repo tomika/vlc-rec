@@ -35,8 +35,8 @@
  *
  * Measured on a Tail 2 (see docs/camera-plugin-interface.md): the position readout is two
  * numbers, tilt then pan, in degrees; "move to angle" uses the same numbers; Right and Up make
- * them smaller. The four speed commands are not used here: the camera obeys only the last one,
- * so a diagonal move needs an absolute target anyway.
+ * them smaller. Continuous drive uses one of the four speed commands at a time: the camera obeys only
+ * the last one. Diagonal absolute moves use a single absolute target.
  *
  * The camera moves both axes at the one speed of the command, so on a diagonal turn the axis with
  * the shorter way arrives first. Cutting the turn into targets every 100 ms along the straight line
@@ -51,6 +51,7 @@
 typedef SOCKET sock_t;
 #define CLOSESOCK closesocket
 #else
+#include <errno.h>
 #include <arpa/inet.h>
 #include <netinet/in.h>
 #include <sys/select.h>
@@ -722,6 +723,70 @@ static int open_socket(int osc_port, int local_port)
     return 1;
 }
 
+
+/* Continuous drive uses only the documented OSC direction commands. Repeated
+ * leases update the deadline locally; the camera receives one start and one stop. */
+static int g_drive_axis = 0, g_drive_speed = 0;
+static long long g_drive_until = 0;
+static int g_drive_default = 20;
+
+static int stop_drive(void)
+{
+    if (!g_drive_axis) return 1;
+    int32_t zero = 0;
+    if (osc_send("/OBSBOT/WebCam/General/SetGimbalRight", &zero, 1) != 0)
+        return fail("network", "Could not stop camera movement.");
+    g_drive_axis = g_drive_speed = 0;
+    g_drive_until = 0;
+    g_pose_valid = 0;
+    return 1;
+}
+
+static int do_drive(double pan, double tilt, double ttl)
+{
+    if (!(fabs(pan) <= 1 && fabs(tilt) <= 1 && ttl >= 200 && ttl <= 2000) || (pan != 0 && tilt != 0))
+        return fail("invalid_params", "ptz.move needs one axis in -1..1 and ttl_ms from 200 to 2000.");
+    if (pan == 0 && tilt == 0) return stop_drive();
+    int axis = pan > 0 ? 1 : pan < 0 ? -1 : tilt > 0 ? 2 : -2;
+    int32_t speed = (int32_t)lround(fmax(fabs(pan), fabs(tilt)) * 100);
+    if (speed < 1) speed = 1;
+    if (axis != g_drive_axis || speed != g_drive_speed) {
+        const char *address = axis == 1 ? "/OBSBOT/WebCam/General/SetGimbalRight" :
+                              axis == -1 ? "/OBSBOT/WebCam/General/SetGimbalLeft" :
+                              axis == 2 ? "/OBSBOT/WebCam/General/SetGimbalUp" :
+                                           "/OBSBOT/WebCam/General/SetGimbalDown";
+        if (osc_send(address, &speed, 1) != 0) return fail("network", "Could not start camera movement.");
+    }
+    g_drive_axis = axis;
+    g_drive_speed = speed;
+    g_drive_until = now_ms() + (long long)ttl;
+    g_pose_valid = 0;
+    return 1;
+}
+
+/* Read a byte only when available, including partial JSON lines. fgets would
+ * block the lease watchdog on an incomplete line from a failed client. */
+static int stdin_byte(char *byte)
+{
+#ifdef _WIN32
+    HANDLE input = GetStdHandle(STD_INPUT_HANDLE);
+    DWORD available = 0, count = 0;
+    if (GetFileType(input) == FILE_TYPE_PIPE) {
+        if (!PeekNamedPipe(input, NULL, 0, NULL, &available, NULL)) return -1;
+        if (!available) { Sleep(10); return 0; }
+    } else if (WaitForSingleObject(input, 50) != WAIT_OBJECT_0) return 0;
+    return ReadFile(input, byte, 1, &count, NULL) && count ? 1 : -1;
+#else
+    fd_set input;
+    FD_ZERO(&input); FD_SET(STDIN_FILENO, &input);
+    struct timeval wait = {0, 10000};
+    int ready = select(STDIN_FILENO + 1, &input, NULL, NULL, &wait);
+    if (ready < 0) return errno == EINTR ? 0 : -1;
+    if (!ready) return 0;
+    return read(STDIN_FILENO, byte, 1) == 1 ? 1 : -1;
+#endif
+}
+
 /* config: the node of the connect config, or -1. */
 static int do_connect(int config, char *capabilities, size_t cap)
 {
@@ -740,6 +805,10 @@ static int do_connect(int config, char *capabilities, size_t cap)
     if (!(nudge >= 1 && nudge <= MAX_SPEED)) return fail("invalid_params", "config.nudgeSpeed must be from 1 to 90.");
     if (!(osc_port >= 1 && osc_port <= 65535 && local_port >= 1 && local_port <= 65535))
         return fail("invalid_params", "config.oscPort and config.localPort must be port numbers.");
+    double drive = jnumber(jfield(config, "driveSpeed"), 20);
+    if (!(drive >= 1 && drive <= 100)) return fail("invalid_params", "config.driveSpeed must be from 1 to 100.");
+    if (!stop_drive()) return 0;
+    g_drive_default = (int)lround(drive);
     strcpy(g_host, host);
     g_hfov = hfov;
     g_zoom_ratio = ratio;
@@ -759,19 +828,19 @@ static int do_connect(int config, char *capabilities, size_t cap)
     g_connected = 1;
     snprintf(capabilities, cap,
              "{\"capabilities\":{\"device\":{\"model\":\"OBSBOT Tail 2\",\"address\":\"%s\"},"
-             "\"ptz\":{\"centerOn\":\"estimated\",\"nudge\":true,\"absolute\":true,"
+             "\"ptz\":{\"centerOn\":\"estimated\",\"nudge\":true,\"absolute\":true,\"continuous\":{\"axes\":\"single\",\"defaultSpeed\":%.2f},"
              "\"speed\":{\"min\":1,\"max\":%d,\"default\":10,\"unit\":\"deg/s\"},"
              "\"pan\":{\"min\":%d,\"max\":%d},\"tilt\":{\"min\":%d,\"max\":%d}},"
              "\"zoom\":{\"by\":true,\"absolute\":true},"
              "\"webPage\":{\"url\":\"http://%s/\"}}}",
-             g_host, MAX_SPEED, -PAN_LIMIT, PAN_LIMIT, -TILT_LIMIT, TILT_LIMIT, g_host);
+             g_host, g_drive_default / 100.0, MAX_SPEED, -PAN_LIMIT, PAN_LIMIT, -TILT_LIMIT, TILT_LIMIT, g_host);
     return 1;
 }
 
 /* ---- requests ---- */
 static int is_device_method(const char *method)
 {
-    static const char *const known[] = {"ptz.centerOn", "ptz.nudge", "ptz.setSpeed", "ptz.get", "zoom.by", "zoom.get", "ptz.moveTo", "zoom.set"};
+    static const char *const known[] = {"ptz.move", "ptz.stop", "ptz.centerOn", "ptz.nudge", "ptz.setSpeed", "ptz.get", "zoom.by", "zoom.get", "ptz.moveTo", "zoom.set"};
     for (size_t i = 0; i < sizeof known / sizeof known[0]; i++) {
         if (strcmp(method, known[i]) == 0) return 1;
     }
@@ -801,6 +870,11 @@ static int handle_request(char *line)
         return 1;
     }
     int ok = 1;
+    // Blocking position/zoom/AI operations supersede a manual drive. Always stop
+    // before entering them so the lease cannot expire while a read blocks.
+    if (g_drive_axis && strcmp(method, "ptz.move") != 0 && strcmp(method, "ptz.stop") != 0) {
+        if (!stop_drive()) { if (has_id) respond_error(id, g_err_code, g_err_msg); return 1; }
+    }
     char result[1536];
     result[0] = 0;
 
@@ -816,6 +890,10 @@ static int handle_request(char *line)
         ok = fail("unsupported", "The adapter has no such method.");
     } else if (!g_connected) {
         ok = fail("not_connected", "The camera is not connected.");
+    } else if (strcmp(method, "ptz.move") == 0) {
+        ok = do_drive(jnumber(jfield(params, "pan"), 0), jnumber(jfield(params, "tilt"), 0), jnumber(jfield(params, "ttl_ms"), 1000));
+    } else if (strcmp(method, "ptz.stop") == 0) {
+        ok = stop_drive();
     } else if (strcmp(method, "ptz.centerOn") == 0) {
         ok = do_center(jnumber(jfield(params, "x"), -1), jnumber(jfield(params, "y"), -1), jnumber(jfield(params, "aspect"), 0));
     } else if (strcmp(method, "ptz.nudge") == 0) {
@@ -851,9 +929,22 @@ static int handle_request(char *line)
 int main(void)
 {
     static char line[8192];
-    while (fgets(line, sizeof line, stdin)) {
-        if (!handle_request(line)) break;
+    size_t used = 0;
+    int overflow = 0;
+    for (;;) {
+        if (g_drive_axis && now_ms() >= g_drive_until) stop_drive();
+        char byte;
+        int ready = stdin_byte(&byte);
+        if (ready < 0) break;
+        if (!ready) continue;
+        if (byte == '\n') {
+            line[used] = 0;
+            if (!overflow && !handle_request(line)) break;
+            used = 0; overflow = 0;
+        } else if (used + 1 < sizeof line) line[used++] = byte;
+        else overflow = 1;
     }
+    stop_drive();
     if (g_connected) {
         int zero = 0;
         osc_send("/OBSBOT/WebCam/General/Disconnected", &zero, 1);

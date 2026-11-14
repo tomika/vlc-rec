@@ -18,6 +18,7 @@ function harness() {
   const actions = [];
   const elements = new Map();
   const events = new Map();
+  const windowEvents = new Map();
   const timeouts = [];
   const timerDelays = [];
   const spawnOptions = [];
@@ -88,7 +89,7 @@ function harness() {
   };
   const context = createContext({
     document: { getElementById: element, activeElement: null, createElement: () => ({ ...newElement(), hidden: false }) },
-    window: { addEventListener() {} },
+    window: { addEventListener(name, fn) { windowEvents.set(name, fn); } },
     NL_PATH: "/app", NL_OS: "Windows", NL_ARCH: "x64", NL_PID: "4242",
     TextEncoder,
     Date: class extends Date { static now() { return now; } },
@@ -109,7 +110,7 @@ function harness() {
   const run = (code) => runInContext(code, context);
   run("parameters.auto_reconnect = true");
   return {
-    files, live, launches, actions, os, elements, events, timeouts, timerDelays, spawnOptions, run, stdin, env, opened, logs,
+    files, live, launches, actions, os, elements, events, windowEvents, timeouts, timerDelays, spawnOptions, run, stdin, env, opened, logs,
     advance(ms) { now += ms; },
     // Runs the latest timer that was set with this delay.
     fireTimer(delay) {
@@ -719,7 +720,7 @@ test("streaming collapses the panel when the window matches the video; the toggl
 
   h.toggle.click();
   assert.equal(h.layout.className, "layout is-stack");
-  assert.deepEqual(h.rects(), ["RECT 133,0,1013,570\n"]);
+  assert.deepEqual(h.rects(), ["RECT 133,0,1013,570 1\n"]);
   await h.run("refreshState()");
   assert.equal(h.layout.className, "layout is-stack", "the user's choice survives the periodic refresh");
 
@@ -962,7 +963,7 @@ test("camera: the adapter is found by its manifest and started in its folder; th
   await cameraAnswers(h, "hello", { result: { interface: 1, plugin: { id: "osc" } } });
   // The manifest's defaults complete what the settings give.
   assert.deepEqual(cameraRequests(h, "connect")[0].params.config,
-    { host: "192.168.1.50", hfov: 76, zoomRatio: 4.6, zoomMax: 36, nudgeSpeed: 30, oscPort: 57110, localPort: 57120 });
+    { host: "192.168.1.50", hfov: 76, zoomRatio: 4.6, zoomMax: 36, nudgeSpeed: 30, oscPort: 57110, localPort: 57120, driveSpeed: 20 });
   assert.equal(h.elements.get("cameraBar").hidden, true, "not connected yet");
 
   await cameraAnswers(h, "connect", { result: { capabilities: FULL_CAPS } });
@@ -2289,4 +2290,143 @@ test("Windows scan shell preserves a bundled executable path containing spaces",
   assert.ok(raw.startsWith("cmd /d /s /c "));
   const { stdout } = await promisify(execFile)(process.env.ComSpec || "cmd.exe", ["/d", "/s", "/c", raw.slice("cmd /d /s /c ".length)], { windowsVerbatimArguments: true, timeout: 10000 });
   assert.match(stdout, /SRT_PROBE_OK/);
+});
+
+
+test("camera: a missing camera host defaults to the manually entered stream IPv4", async () => {
+  const h = cameraHarness();
+  h.run('parameters.camera_config = {}; parameters.ip_address = "192.168.1.159:5000"');
+  await h.run("startCamera()");
+  await cameraAnswers(h, "hello", { result: {} });
+  assert.equal(cameraRequests(h, "connect")[0].params.config.host, "192.168.1.159");
+  // An explicitly configured separate control address is retained.
+  h.run('parameters.camera_config.host = "192.168.1.77"');
+  assert.equal(h.run("cameraConfigFor(cameraProc.plugin.manifest).host"), "192.168.1.77");
+});
+
+test("camera: starting a manually edited stream restarts control at the new address", async () => {
+  const h = cameraHarness();
+  await connectCamera(h);
+  h.elements.get("ip").value = "192.168.1.2:5000";
+  h.elements.get("ip").input();
+  await h.start(false);
+  assert.equal(h.run("parameters.camera_config.host"), "192.168.1.2");
+  assert.equal(cameraRequests(h, "shutdown").length, 1);
+  await cameraAnswers(h, "hello", { result: {} });
+  assert.equal(cameraRequests(h, "connect").at(-1).params.config.host, "192.168.1.2");
+});
+
+const driveKey = (h, key, action = "keydown", extra = {}) => h.windowEvents.get(action)({
+  key, target: { tagName: "BODY" }, preventDefault() {}, ...extra
+});
+const driveCaps = { ...FULL_CAPS, ptz: { ...FULL_CAPS.ptz, continuous: { axes: "single", defaultSpeed: 0.2 } } };
+
+test("camera: held arrows start once, renew the lease, and stop before a late start response", async () => {
+  const h = cameraHarness();
+  await connectCamera(h, driveCaps);
+  driveKey(h, "ArrowRight");
+  driveKey(h, "ArrowRight", "keydown", { repeat: true });
+  assert.deepEqual(cameraRequests(h, "ptz.move").map(r => r.params), [{ pan: 0.2, tilt: 0, ttl_ms: 1000 }]);
+  assert.equal(cameraRequests(h, "ptz.nudge").length, 0);
+  await cameraAnswers(h, "ptz.move", { result: {} });
+  h.fireTimer(333);
+  assert.equal(cameraRequests(h, "ptz.move").length, 2);
+  driveKey(h, "ArrowRight", "keyup");
+  assert.equal(cameraRequests(h, "ptz.stop").length, 1);
+  await cameraAnswers(h, "ptz.move", { result: {} });
+  assert.equal(h.run("cameraDrive"), null, "a late acknowledgement cannot restart a released key");
+});
+
+test("camera: latest held axis wins; release resumes the earlier key; blur always stops", async () => {
+  const h = cameraHarness();
+  await connectCamera(h, driveCaps);
+  driveKey(h, "ArrowRight");
+  driveKey(h, "ArrowUp", "keydown", { shiftKey: true });
+  driveKey(h, "ArrowUp", "keyup");
+  assert.deepEqual(cameraRequests(h, "ptz.move").map(r => [r.params.pan, r.params.tilt]), [[0.2,0],[0,1],[0.2,0]]);
+  h.windowEvents.get("blur")();
+  assert.equal(cameraRequests(h, "ptz.stop").length, 1);
+  assert.equal(h.run("cameraHeldKeys.size"), 0);
+  driveKey(h, "ArrowRight", "keydown", { repeat: true });
+  assert.equal(h.run("cameraDrive"), null, "focus return with a stale repeated key cannot start a motor");
+});
+
+test("camera: input focus, scan, shutdown and failed leases stop continuous motion", async () => {
+  for (const end of ["focus", "scan", "shutdown", "error"]) {
+    const h = cameraHarness();
+    await connectCamera(h, driveCaps);
+    driveKey(h, "ArrowDown");
+    if (end === "focus") h.windowEvents.get("focusin")({ target: { tagName: "INPUT" } });
+    if (end === "scan") h.run("openScanDialog()");
+    if (end === "shutdown") h.run("stopCamera()");
+    if (end === "error") await cameraAnswers(h, "ptz.move", { error: { code: "timeout", message: "lost" } });
+    assert.equal(cameraRequests(h, "ptz.stop").length, 1, end);
+    assert.equal(h.run("cameraDrive"), null, end);
+  }
+});
+
+
+test("Windows scan watchdog and abort kill the process tree before releasing the shell", async () => {
+  for (const end of ["timeout", "abort"]) {
+    const h = harness(), order = [];
+    h.os.execCommand = async command => { order.push(command); return { exitCode: 0 }; };
+    h.os.updateSpawnedProcess = async (id, action) => { order.push(action); };
+    const probe = h.run('runSrtProbe("probe", 30001)');
+    await flush();
+    if (end === "timeout") h.fireTimer(30001);
+    else await h.run("abortActiveScanProbes()");
+    assert.equal(await probe, h.run("RESULT_STATE_NOT_SRT"));
+    assert.deepEqual(order, ["taskkill /PID 1002 /T /F", "exit"]);
+    assert.equal(h.run("scanState.activeProbeIds.size"), 0);
+    assert.equal(h.run("probeProcessHandlers.size"), 0);
+  }
+});
+
+test("Windows scan timeout reaps a real hung child process", { skip: process.platform !== "win32" }, async t => {
+  const fs = require("node:fs"), path = require("node:path"), os = require("node:os"), { spawn } = require("node:child_process");
+  const directory = fs.mkdtempSync(path.join(os.tmpdir(), "scan watchdog "));
+  const script = path.join(directory, "hung.cjs"), marker = path.join(directory, "pid");
+  fs.writeFileSync(script, `require('node:fs').writeFileSync(${JSON.stringify(marker)}, String(process.pid)); setInterval(() => {}, 1000);`);
+  const h = harness(); let shell, nodePid;
+  h.os.spawnProcess = async command => {
+    shell = spawn(process.env.ComSpec || "cmd.exe", ["/d", "/s", "/c", command.slice("cmd /d /s /c ".length)],
+      { windowsHide: true, windowsVerbatimArguments: true, stdio: "ignore" });
+    await new Promise((resolve, reject) => { shell.once("spawn", resolve); shell.once("error", reject); });
+    return { id: 99, pid: shell.pid };
+  };
+  h.os.execCommand = async command => {
+    assert.match(command, /^taskkill \/PID \d+ \/T \/F$/);
+    await promisify(execFile)("taskkill.exe", command.split(" ").slice(1), { windowsHide: true });
+    return { exitCode: 0 };
+  };
+  h.os.updateSpawnedProcess = async () => {};
+  try {
+    const command = h.run(`shellQuote(${JSON.stringify(process.execPath)}) + " " + shellQuote(${JSON.stringify(script)})`);
+    const probe = h.run(`runSrtProbe(${JSON.stringify(command)}, 30001)`);
+    for (let i=0; i<100 && !fs.existsSync(marker); i++) await new Promise(resolve => setTimeout(resolve, 50));
+    assert.ok(fs.existsSync(marker), "the real child reached its indefinite wait");
+    nodePid = Number(fs.readFileSync(marker, "utf8"));
+    process.kill(nodePid, 0);
+    h.fireTimer(30001);
+    assert.equal(await probe, h.run("RESULT_STATE_NOT_SRT"));
+    assert.throws(() => process.kill(nodePid, 0), { code: "ESRCH" });
+  } finally {
+    if (shell && shell.exitCode === null) await promisify(execFile)("taskkill.exe", ["/PID", String(shell.pid), "/T", "/F"], { windowsHide: true }).catch(() => {});
+    fs.rmSync(directory, { recursive: true, force: true });
+  }
+});
+
+
+test("closing the app waits for scan child cleanup before exiting", async () => {
+  const h = harness();
+  const order = [];
+  h.os.execCommand = async command => { assert.ok(!h.actions.includes("app-exit")); order.push(command); return { exitCode: 0 }; };
+  h.os.updateSpawnedProcess = async (id, action) => { order.push(action); };
+  const probe = h.run('runSrtProbe("probe", 30001)');
+  await flush();
+  await h.run('scanState.running = true; closeRequested = true; withBusy(async () => {})');
+  await probe;
+  assert.deepEqual(order, ["taskkill /PID 1002 /T /F", "exit"]);
+  assert.ok(h.actions.includes("app-exit"));
+  assert.equal(h.run("scanState.running"), false);
 });

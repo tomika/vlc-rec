@@ -80,6 +80,8 @@ async function sendInput(request) {
     else if (step.click) args = ["click", String(step.click)];
     else if (step.wheel) args = ["click", step.wheel === "up" ? "4" : "5"];
     else if (step.key) args = ["key", step.key];
+    else if (step.keydown) args = ["keydown", step.keydown];
+    else if (step.keyup) args = ["keyup", step.keyup];
     if (args) spawnSync("xdotool", args);
     await sleep(step.wait || 150);
   }
@@ -106,12 +108,14 @@ function cameraChecks() {
   const zooms = lines.filter((l) => l.includes("/SetZoom [")).map((l) => JSON.parse(l.replace(/^.*SetZoom /, ""))[0]);
   const near = (a, b) => Math.abs(a - b) <= 1;
   const first = turns[0];
-  const second = turns[1];
+  const drive = lines.filter(l => /SetGimbal(Right|Left|Up|Down) /.test(l));
+  const starts = drive.filter(l => !l.endsWith("[0]"));
+  const stops = drive.filter(l => l.endsWith("[0]"));
   return [
     { name: "click on the picture turned the camera to the right", ok: Boolean(first) && near(first[1], -21) && near(first[2], 0), detail: JSON.stringify(first) },
     { name: "mouse wheel up zoomed in", ok: zooms.includes(2), detail: JSON.stringify(zooms) },
-    { name: "arrow key nudged the pan by 2 degrees", ok: Boolean(first && second) && near(second[1], first[1] - 2) && near(second[2], first[2]), detail: JSON.stringify(second) },
-    { name: "up key nudged the tilt", ok: turns.length >= 3 && near(turns[2][2], turns[1][2] - 2), detail: JSON.stringify(turns[2]) }
+    { name: "held right key starts one continuous pan", ok: starts.length === 2 && starts[0].includes("SetGimbalRight [20]"), detail: JSON.stringify(drive) },
+    { name: "held up key starts one continuous tilt and both releases stop", ok: starts.length === 2 && starts[1].includes("SetGimbalUp [20]") && stops.length === 2 && turns.length === 1, detail: JSON.stringify(drive) }
   ];
 }
 

@@ -69,8 +69,8 @@ def main():
         now = time.monotonic()
         dt, last = now - last, now
         # 1 speed unit = 0.5 degrees per second
-        pan += (speed["Right"] - speed["Left"]) * 0.5 * dt
-        tilt += (speed["Up"] - speed["Down"]) * 0.5 * dt
+        pan -= (speed["Right"] - speed["Left"]) * 0.5 * dt
+        tilt -= (speed["Up"] - speed["Down"]) * 0.5 * dt
         try:
             data, src = sock.recvfrom(2048)
         except socket.timeout:
@@ -87,6 +87,7 @@ def main():
         elif name == "GetZoomInfo":
             sock.sendto(encode("/OBSBOT/WebCam/General/ZoomInfo", [zoom, 0]), reply)
         elif name in ("SetGimbalUp", "SetGimbalDown", "SetGimbalLeft", "SetGimbalRight"):
+            speed = {direction: 0 for direction in speed}
             speed[name[len("SetGimbal"):]] = ints[0] if ints else 0
         elif name == "SetGimMotorDegree" and len(ints) == 3:
             pan, tilt = float(ints[1]), float(ints[2])

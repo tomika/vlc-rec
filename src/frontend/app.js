@@ -134,6 +134,10 @@ const SIDE_PANEL_MAX_WIDTH = 560;
 // right after a turn would aim at a picture that is already out of date.
 const CAMERA_CLICK_COOLDOWN_MS = 1000;
 const CAMERA_NUDGE_INTERVAL_MS = 90;
+const CAMERA_DRIVE_TTL_MS = 1000;
+let cameraAddressChanged = false;
+let cameraDrive = null;
+const cameraHeldKeys = new Map();
 const CAMERA_WHEEL_INTERVAL_MS = 120;
 const CAMERA_NOTE_MS = 6000;
 // Measured on a Tail 2 with its SRT picture: a turn starts 150 to 500 ms after the command, and
@@ -492,6 +496,7 @@ function updateScanControls() {
 }
 
 function openScanDialog() {
+  stopCameraDrive();
   const currentIpValue = ip.value.trim();
   if (currentIpValue) {
     parameters.ip_address = currentIpValue;
@@ -915,11 +920,10 @@ async function runSrtProbe(commandLine, watchdogMs) {
 
     // Backstop: a probe that never reports an exit must not stall its worker.
     const timer = setTimeout(() => {
-      Neutralino.os.updateSpawnedProcess(probeId, "exit").catch(() => {});
-      settle("");
+      terminateScanProbe(probeId).finally(() => settle(""));
     }, watchdogMs);
 
-    probeProcessHandlers.set(probeId, { output: "", settle });
+    probeProcessHandlers.set(probeId, { output: "", settle, pid: procInfo.pid });
   });
 
   return output.includes(PROBE_OK_MARKER) ? RESULT_STATE_FOUND : RESULT_STATE_NOT_SRT;
@@ -1001,12 +1005,32 @@ function handleProbeSpawnedProcessEvent(evt) {
   }
 }
 
+// Neutralino's exit action kills the shell, leaving its VLC/ffprobe child alive
+// on Windows. Kill the tree while the parent PID still exists, then release it.
+async function terminateScanProbe(probeId) {
+  const handler = probeProcessHandlers.get(probeId);
+  if (!handler) return;
+  if (handler.terminating) return handler.terminating;
+  handler.terminating = (async () => {
+    const pid = Number(handler.pid);
+    if (NL_OS === "Windows" && Number.isSafeInteger(pid) && pid > 0) {
+      await Neutralino.os.execCommand(`taskkill /PID ${pid} /T /F`).catch((err) => logDebug(`Scan process cleanup: ${normalizeError(err)}`));
+    }
+    await Neutralino.os.updateSpawnedProcess(probeId, "exit").catch(() => {});
+  })();
+  return handler.terminating;
+}
+
 async function abortActiveScanProbes() {
   const probeIds = Array.from(scanState.activeProbeIds);
   if (probeIds.length === 0) return;
 
   await Promise.all(
-    probeIds.map((probeId) => Neutralino.os.updateSpawnedProcess(probeId, "exit").catch(() => {}))
+    probeIds.map(async (probeId) => {
+      const handler = probeProcessHandlers.get(probeId);
+      await terminateScanProbe(probeId);
+      if (handler) handler.settle("");
+    })
   );
 }
 
@@ -1205,6 +1229,7 @@ function cameraCan(feature) {
   switch (feature) {
     case "centerOn": return Boolean(ptz.centerOn);
     case "nudge": return Boolean(ptz.nudge);
+    case "continuous": return Boolean(ptz.continuous);
     case "speed": return Boolean(ptz.speed && typeof ptz.speed === "object");
     case "zoom": return Boolean(caps.zoom && caps.zoom.by);
     case "trackPerson": return Boolean(caps.ai && caps.ai.trackPerson);
@@ -1246,7 +1271,8 @@ function cameraHint() {
   if (cameraCan("centerOn")) parts.push("Click the picture to centre it.");
   if (cameraCan("trackPerson")) parts.push("Double-click a person to follow them.");
   if (cameraCan("zoom")) parts.push("Mouse wheel: zoom.");
-  if (cameraCan("nudge")) parts.push("Arrow keys: turn (Shift: larger steps).");
+  if (cameraCan("continuous")) parts.push("Hold arrow keys to turn; release to stop (Shift: faster).");
+  else if (cameraCan("nudge")) parts.push("Arrow keys: turn (Shift: larger steps).");
   if (presetsAvailable()) {
     parts.push("Keys 1-9: apply a preset. Alt+number: teach it from the camera as it is now, Alt+Shift: position only, " +
       "Alt+Ctrl: zoom only, Alt+Ctrl+Shift: delete. Key 0: the fixed wide shot with the camera centered. " +
@@ -1418,7 +1444,12 @@ function cameraConfigFor(manifest) {
   const saved = parameters.camera_config && typeof parameters.camera_config === "object" ? parameters.camera_config : {};
   const config = {};
   for (const field of manifestFields(manifest)) {
-    const value = saved[field.key] !== undefined ? saved[field.key] : field.default;
+    let value = saved[field.key] !== undefined ? saved[field.key] : field.default;
+    // A stream found by scanning and one entered by hand must work the same way.
+    if (field.key === "host" && !String(value || "").trim()) {
+      const host = parseAddressPort(parameters.ip_address).host;
+      if (isValidIPv4(host)) value = host;
+    }
     if (value === undefined || value === null) continue;
     if (field.type === "int" || field.type === "number") {
       const number = Number(value);
@@ -1520,6 +1551,7 @@ async function connectCamera(proc) {
 }
 
 function applyCameraCapabilities(proc, caps) {
+  stopCameraDrive();
   proc.caps = caps && typeof caps === "object" ? caps : {};
   showCameraControls();
   if (cameraCan("trackStatus")) refreshCameraAiState(proc);
@@ -1556,6 +1588,7 @@ function updateAiIndicator() {
 
 async function refreshCameraAiState(proc = cameraProc) {
   if (!proc || proc !== cameraProc || !cameraCan("trackStatus") || proc.aiPolling || proc.aiBusy) return;
+  if (cameraDrive) return;
   const revision = proc.aiRevision || 0;
   proc.aiPolling = true;
   try {
@@ -1578,6 +1611,7 @@ async function refreshCameraAiState(proc = cameraProc) {
 }
 
 async function runCameraAiAction(method, params = {}, verifyStopped = false) {
+  stopCameraDrive();
   const proc = cameraProc;
   if (!proc || !cameraCan("trackStatus")) return false;
   if (proc.aiBusy) {
@@ -1613,6 +1647,7 @@ async function runCameraAiAction(method, params = {}, verifyStopped = false) {
 }
 
 function stopCamera() {
+  stopCameraDrive();
   const proc = cameraProc;
   if (!proc || proc.exited) return;
   proc.stopping = true;
@@ -1737,6 +1772,7 @@ function handleCameraProcessEvent(evt) {
     handleCameraOutput(String(detail.data || ""));
   } else if (detail.action === "exit") {
     const proc = cameraProc;
+    stopCameraDrive();
     cameraProc = null;
     proc.exited = true;
     failPendingCameraRequests(proc);
@@ -1753,6 +1789,7 @@ function turnCameraTo(x, y) {
   if (Math.abs(x - 0.5) < 0.02 && Math.abs(y - 0.5) < 0.02) return;
   if (Date.now() < cameraBusyUntil) return;
   cameraBusyUntil = Date.now() + CAMERA_CLICK_COOLDOWN_MS;
+  stopCameraDrive();
   sendCameraRequest("ptz.centerOn", { x: Number(x.toFixed(4)), y: Number(y.toFixed(4)), aspect: Number(videoAspect.toFixed(4)) });
 }
 
@@ -1764,6 +1801,7 @@ function cameraZoomStep() {
 // delta: percent of the zoom range, negative zooms out.
 function zoomCamera(delta) {
   if (!cameraCan("zoom")) return;
+  stopCameraDrive();
   sendCameraRequest("zoom.by", { delta: delta / 100 });
 }
 
@@ -1830,13 +1868,18 @@ const ARROW_DIRECTIONS = {
   ArrowDown: [0, -1]
 };
 
-// Arrow keys turn the camera while no text field has the focus; Shift makes the step five times larger.
-// Key repeat is thinned out, and the adapter builds each step on the previous target.
+// Hold an arrow key to turn; old adapters without continuous drive keep their discrete steps.
 function handleArrowKey(evt) {
   const direction = ARROW_DIRECTIONS[evt.key];
-  if (!direction || !cameraCan("nudge") || !scanDialog.hidden) return;
+  if (!direction || !(cameraCan("continuous") || cameraCan("nudge")) || !scanDialog.hidden) return;
   if (evt.ctrlKey || evt.altKey || evt.metaKey || isTypingTarget(evt)) return;
   evt.preventDefault();
+  if (cameraCan("continuous")) {
+    if (evt.repeat || cameraHeldKeys.has(evt.key)) return;
+    cameraHeldKeys.set(evt.key, { direction, shift: Boolean(evt.shiftKey) });
+    updateCameraDrive();
+    return;
+  }
   const now = Date.now();
   if (now - lastNudgeAt < CAMERA_NUDGE_INTERVAL_MS) return;
   lastNudgeAt = now;
@@ -1845,7 +1888,47 @@ function handleArrowKey(evt) {
   sendCameraRequest("ptz.nudge", { pan: direction[0] * step, tilt: direction[1] * step });
 }
 
+// Single-axis adapters use the most recently pressed key. Releasing it resumes
+// an earlier held key. Heartbeats renew the lease without restarting the motor.
+function updateCameraDrive() {
+  const held = [...cameraHeldKeys.values()].at(-1);
+  if (!held || !cameraCan("continuous")) return stopCameraDrive();
+  if (cameraDrive) clearTimeout(cameraDrive.timer);
+  const base = Number(cameraCaps().ptz.continuous.defaultSpeed) || 0.2;
+  const speed = Math.min(1, Math.max(0.01, base) * (held.shift ? 5 : 1));
+  const drive = { proc: cameraProc, pan: held.direction[0] * speed, tilt: held.direction[1] * speed };
+  cameraDrive = drive;
+  const renew = () => {
+    if (cameraDrive !== drive || cameraProc !== drive.proc) return;
+    cameraRequest(drive.proc, "ptz.move", { pan: drive.pan, tilt: drive.tilt, ttl_ms: CAMERA_DRIVE_TTL_MS })
+      .then(() => {
+        if (cameraDrive === drive) drive.timer = setTimeout(renew, Math.floor(CAMERA_DRIVE_TTL_MS / 3));
+      }).catch((err) => {
+        if (cameraDrive !== drive) return;
+        stopCameraDrive();
+        if (err.code !== "stopped") setCameraNote(err.message);
+      });
+  };
+  renew();
+}
+
+function stopCameraDrive() {
+  const drive = cameraDrive;
+  cameraDrive = null;
+  cameraHeldKeys.clear();
+  if (!drive) return;
+  clearTimeout(drive.timer);
+  if (drive.proc === cameraProc && !drive.proc.exited) sendCameraRequest("ptz.stop", {});
+}
+
+function handleKeyUp(evt) {
+  if (!cameraHeldKeys.delete(evt.key)) return;
+  evt.preventDefault();
+  updateCameraDrive();
+}
+
 function handleKeyDown(evt) {
+  if (evt.key === "Escape" || isTypingTarget(evt) || evt.ctrlKey || evt.altKey || evt.metaKey) stopCameraDrive();
   if (evt.key === "Escape") {
     if (!scanDialog.hidden) {
       closeScanDialog();
@@ -1971,6 +2054,7 @@ function savePresets() {
 }
 
 async function applyPreset(slot) {
+  stopCameraDrive();
   if (!presetsAvailable()) return;
   const preset = presetOf(slot);
   if (!preset) {
@@ -2285,6 +2369,7 @@ function restartPreview() {
 
 function buildPlayerCommand(playerPath, streamUri, record, ext, fullOutput, rect) {
   const args = ["--parent-pid", String(NL_PID), "--url-hex", utf8Hex(streamUri), "--rect", rect];
+  if (NL_OS === "Windows") args.push("--rect-scale", String(window.devicePixelRatio || 1));
   if (previewCachingMs() >= 0) args.push("--caching", String(previewCachingMs()));
   if (!record && srtLatencyMs() >= 0) args.push("--srt-latency", String(srtLatencyMs()));
   if (record) args.push("--record-hex", utf8Hex(fullOutput), "--mux", ext === "mp4" ? "mp4" : "mkv");
@@ -2396,7 +2481,7 @@ function syncPlayerRect() {
   const rect = videoRectArg();
   if (proc.sentRect === rect) return;
   proc.sentRect = rect;
-  sendPlayerCommand(`RECT ${rect}`);
+  sendPlayerCommand(`RECT ${rect}${NL_OS === "Windows" ? ` ${window.devicePixelRatio || 1}` : ""}`);
 }
 
 function layoutInputKey() {
@@ -2950,6 +3035,14 @@ async function startOperation({ record, ipAddress, outputPathValue, filenameBase
     await terminateCurrent("Switching operation...");
   }
 
+  if (cameraAddressChanged) {
+    const host = await cameraHostFor(parseAddressPort(ipAddress).host);
+    if (host) {
+      parameters.camera_config = { ...(parameters.camera_config || {}), host };
+      await restartCamera().catch((err) => logDebug(`Camera adapter: ${normalizeError(err)}`));
+    }
+    cameraAddressChanged = false;
+  }
   await saveParams(ipAddress, outputPathValue, outputFilename);
 
   const simMode = isSimulationMode();
@@ -3137,6 +3230,8 @@ async function withBusy(fn) {
   } finally {
     setBusy(false);
     if (closeRequested) {
+      requestScanAbort("Closing...");
+      await abortActiveScanProbes();
       await terminateCurrent("Stopped.");
       await pendingParamsWrite.catch(() => {});
       await Neutralino.app.exit();
@@ -3312,6 +3407,7 @@ browseBtn.addEventListener("click", () => {
 });
 
 ip.addEventListener("input", () => {
+  cameraAddressChanged = true;
   const value = ip.value.trim();
   if (value) {
     parameters.ip_address = value;
@@ -3390,9 +3486,12 @@ previewCaching.addEventListener("change", handlePreviewCachingChange);
 srtLatency.addEventListener("change", handleSrtLatencyChange);
 bufferApplyBtn.addEventListener("click", () => restartPreview().catch(() => {}));
 window.addEventListener("keydown", handleKeyDown);
+window.addEventListener("keyup", handleKeyUp);
+window.addEventListener("focusin", (evt) => { if (isTypingTarget(evt)) stopCameraDrive(); });
 window.addEventListener("pointerdown", handleWindowPointerDown);
 panel.addEventListener("scroll", closePresetMenu);
-window.addEventListener("blur", closePresetMenu);
+window.addEventListener("blur", () => { stopCameraDrive(); closePresetMenu(); });
+window.addEventListener("pagehide", stopCameraDrive);
 window.addEventListener("resize", closePresetMenu);
 
 init().catch(async (err) => {

@@ -2,7 +2,7 @@
 
 The app can control the camera that produces the SRT stream: turn it by clicking the picture, zoom, and open the camera's own control page. The app knows nothing about any camera. It talks to an **adapter**, a small separate program written for one camera model (or one protocol: OSC, VISCA, HTTP, ...), through a fixed interface. Anyone can write an adapter for their own camera and drop it into a folder; the app does not change.
 
-**Status.** Interface version 1 is implemented: discovery by manifest, the JSON Lines protocol, the `hello`/`connect` handshake with capabilities, click to centre, small turns (arrow keys), turning speed, relative zoom, absolute moves with presets 1 to 9 kept by the app, the camera's web page, and optional AI tracking with state polling and a visual indicator. The app draws only the controls that the capabilities declare. The first adapter is `plugins/osc/` (OBSBOT Tail 2 over its OSC interface). Sections marked **Planned** are the designed rest of the interface (continuous drive, focus, presets kept in the camera, image settings, actions such as formatting the SD card) and are not built; an adapter and the app ignore what they do not know, so they can be added without breaking version 1.
+**Status.** Interface version 1 is implemented: discovery by manifest, the JSON Lines protocol, the `hello`/`connect` handshake with capabilities, click to centre, continuous arrow-key drive with lease expiry and discrete turns, turning speed, relative zoom, absolute moves with presets 1 to 9 kept by the app, the camera's web page, and optional AI tracking with state polling and a visual indicator. The app draws only the controls that the capabilities declare. The first adapter is `plugins/osc/` (OBSBOT Tail 2 over its OSC interface). Sections marked **Planned** are the designed rest of the interface (focus, presets kept in the camera, image settings, actions such as formatting the SD card) and are not built; an adapter and the app ignore what they do not know, so they can be added without breaking version 1.
 
 ## Goals and non-goals
 
@@ -196,7 +196,8 @@ The result of `connect`, and re-sent as `event capabilities` when something chan
 | `ptz.centerOn` | `"native"` (the camera does it) or `"estimated"` (computed from the optics): a click on the picture turns the camera. |
 | `ai.trackPerson` | Double-click a person to request tracking. The first click waits for the configured interval before centering; a later double-click does not issue a tracking request. |
 | `ai.status` and `ai.stop` | Poll actual tracking state, show a blue preview edge while enabled, and stop tracking on the next double-click or before applying a preset. |
-| `ptz.nudge` | The arrow keys turn the camera. |
+| `ptz.nudge` | Discrete arrow steps when continuous drive is unavailable. |
+| `ptz.continuous` | Hold arrow keys to drive; release stops. `{axes:"single",defaultSpeed:0.2}` declares a single axis and the default normalized velocity. |
 | `ptz.absolute` | `ptz.get` and `ptz.moveTo` work: position presets. |
 | `zoom.absolute` | `zoom.get` and `zoom.set` work: zoom presets. |
 | `ptz.speed` | The turning speed slider, with `min` and `max`. |
@@ -287,16 +288,20 @@ The camera code is in `src/frontend/app.js` (the app is one script, so there is 
 - All camera calls fail soft. Errors go to a note after the status text, not into a modal. **Planned:** destructive actions always get a confirmation dialog.
 - `nativeAllowList` already covers `os.*`, so no config change is needed.
 
+## Continuous pan/tilt drive (implemented)
+
+`ptz.continuous` declares `ptz.move {pan, tilt, ttl_ms?}` and `ptz.stop {}`. Velocities are normalized -1..1, positive right/up. TTL defaults to 1000 ms; the OSC adapter accepts 200-2000 ms. `{axes:"single",defaultSpeed:0.2}` means that only one nonzero axis is accepted and gives the default keyboard velocity. The app uses the most recently pressed arrow and sends a heartbeat every TTL/3 after acknowledgement; release, focus loss, Scan and shutdown stop the drive. Shift multiplies velocity by five, capped at one. Adapters must stop autonomously on expiry, shutdown and EOF, including when stdin contains an incomplete line. Identical renewals must not resend the hardware start command.
+
+The OSC adapter maps velocity magnitude to the documented 1-100 direction speed, and stops with a single zero direction command. `camera_config.driveSpeed` defaults to 20 percent and supplies `defaultSpeed`. This is separate from the degree-per-second speed of absolute turns. Other device operations supersede and stop manual drive before blocking reads; AI status polling in the app pauses while a key is held.
+
 ## Planned: the rest of the interface
 
 None of this exists in the app or in the Tail 2 adapter yet. It is the design that version 1 was cut from, kept so that adapters written now fit it later. Methods and capability blocks are added the same way as the ones above: an adapter declares them, the app offers them.
 
-### Pan, tilt and zoom drive
+### Remaining drive methods
 
 | method | params | notes |
 |---|---|---|
-| `ptz.move` | `pan`, `tilt` (-1..1), `ttl_ms?` | Continuous velocity; the adapter maps it to the camera's own speed scale. `ttl_ms`: the adapter stops the motion by itself if no new `ptz.move` arrives in time, so a lost stop message cannot leave the camera running. The app sends a heartbeat while a button is held. Default 1000. |
-| `ptz.stop` | none | Same as `ptz.move` with 0, 0. |
 | `ptz.home` | none | Back to the home position. |
 | `zoom.move` | `speed` (-1..1), `ttl_ms?` | Continuous, positive is tele. 0 stops. |
 

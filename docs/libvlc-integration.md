@@ -215,3 +215,9 @@ Korlátok:
 - Csak x86-64-re készül.
 - A CI nem építi, mert a mérete miatt túl sok tárhelyet foglalna, ezért helyben kell elkészíteni. A lépés ki van kommentezve a `ci-release.yml`-ben, így a visszakapcsolása sem futott még.
 - A csomag GPL és LGPL alatti programokat tartalmaz, ezek listája és licence a `usr/share/doc/third-party` mappában van. Aki terjeszti a fájlt, annak a forráskódra vonatkozó kötelezettségeket is teljesítenie kell, és a H.264/HEVC kodekek szabadalmi kérdését is mérlegelnie kell.
+
+### Windows: DPI ?s a be?gyazott vide?ablak
+
+A lej?tsz? a sz?l?ablak t?nyleges DPI-k?rnyezet?t veszi ?t; a WebView2 `Chrome_RenderWidgetHostHWND` ablak?t haszn?lja sz?l?k?nt, ha el?rhet?. ?gy a letiltott vide?ablak bemeneti esem?nyei a b?ng?sz?h?z jutnak. A `--rect-scale` ?s a Windowsos `RECT x,y,w,h scale` a b?ng?sz? `devicePixelRatio` ?rt?k?t viszi ?t: a fizikai k?ppontokat a sz?l?ablak klienskoordin?t?ira kell alak?tani. A RECT/HIDE/SHOW v?grehajt?sa a vide?ablak saj?t ?zenetkezel? sz?l?n t?rt?nik.
+
+Ellen?rz?s: `npm run test:windows-vlc`. A val?di DLL- ?s kodekteszt ut?n a program k?perny?n k?v?li fogad?ablakban, k?l?n lej?tsz?folyamattal ellen?rzi a DPI-unaware, system-aware ?s per-monitor-v2 m?dot, a sz?l?t, az ?tm?retez?st, mozgat?st, elrejt?st ?s megjelen?t?st. Figyeli, hogy a VLC ne hozzon l?tre l?that? fels? szint? ablakot. A `node scripts/test-windows-vlc.js --embed-only` a m?r megl?v? runtime-ot haszn?lja a t?bb sz?z MB-os ?jram?sol?s helyett. A fizikai kamera ?s a val?di WebView2 bemeneti ?tvonal?nak k?zi pr?b?ja ett?l k?l?n ellen?rz?s.

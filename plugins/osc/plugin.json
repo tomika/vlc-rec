@@ -38,7 +38,7 @@
     },
     {
       "key": "nudgeSpeed",
-      "label": "Speed of the arrow keys, degrees per second",
+      "label": "Speed of discrete steps, degrees per second",
       "type": "int",
       "default": 30
     },
@@ -53,6 +53,12 @@
       "label": "Port the camera answers to on this computer",
       "type": "int",
       "default": 57120
+    },
+    {
+      "key": "driveSpeed",
+      "label": "Continuous turning speed, percent (Shift: five times faster)",
+      "type": "int",
+      "default": 20
     }
   ]
 }
