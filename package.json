@@ -15,13 +15,15 @@
     "test:e2e:real": "node tests/e2e/run-e2e.js --mode real",
     "test:e2e:linux": "node tests/e2e/run-linux.js",
     "run:appimage": "node scripts/run-appimage-wslg.js",
-    "build": "npm run build:player && node scripts/check-public-package.js && neu build",
-    "package": "npm run build:player && node scripts/check-public-package.js && neu build --release --embed-resources && node scripts/postpackage-linux-launchers.js",
-    "package:clean": "npm run build:player && node scripts/check-public-package.js && neu build --clean --release --embed-resources && node scripts/postpackage-linux-launchers.js",
+    "build": "npm run build:player && npm run build:vlc && node scripts/check-public-package.js && neu build",
+    "package": "npm run build:player && npm run build:vlc && node scripts/check-public-package.js && neu build --release --embed-resources && node scripts/postpackage-linux-launchers.js",
+    "package:clean": "npm run build:player && npm run build:vlc && node scripts/check-public-package.js && neu build --clean --release --embed-resources && node scripts/postpackage-linux-launchers.js",
     "package:appimage": "npm run package && node scripts/build-appimage.js",
     "test:e2e:appimage": "node tests/e2e/run-appimage.js",
     "postinstall": "neu update",
-    "check:public": "node scripts/check-public-package.js"
+    "check:public": "node scripts/check-public-package.js",
+    "build:vlc": "node scripts/bundle-windows-vlc.js",
+    "test:windows-vlc": "node scripts/test-windows-vlc.js"
   },
   "devDependencies": {
     "@neutralinojs/neu": "^11.7.1"

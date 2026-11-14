@@ -310,8 +310,11 @@ static int g_libvlc_wrong_bitness = 0;
 
 static lib_t try_load_dir(const wchar_t *dir)
 {
-    wchar_t path[1024];
+    wchar_t path[1024], normalized[1024];
     if (!dir || !dir[0]) return NULL;
+    DWORD full_length = GetFullPathNameW(dir, 1024, normalized, NULL);
+    if (!full_length || full_length >= 1024) return NULL;
+    dir = normalized;
     _snwprintf(path, 1024, L"%ls\\libvlc.dll", dir);
     path[1023] = 0;
     /* The altered search path lets libvlc.dll find libvlccore.dll beside it. */
@@ -326,6 +329,22 @@ static lib_t load_libvlc(void)
     lib_t lib;
     DWORD n = GetEnvironmentVariableW(L"VLC_REC_LIBVLC_DIR", dir, 1024);
     if (n > 0 && n < 1024) return try_load_dir(dir);
+
+    /* This helper lives in player/, while the portable VLC directory is beside player/. */
+    wchar_t executable[1024], bundled[1024], dll[1024];
+    DWORD length = GetModuleFileNameW(NULL, executable, 1024);
+    if (length > 0 && length < 1024) {
+        wchar_t *slash = wcsrchr(executable, L'\\');
+        if (slash) {
+            *slash = 0;
+            _snwprintf(bundled, 1024, L"%ls\\..\\vlc", executable);
+            bundled[1023] = 0;
+            _snwprintf(dll, 1024, L"%ls\\libvlc.dll", bundled);
+            dll[1023] = 0;
+            /* An invalid bundled DLL is a package error; do not silently use another version. */
+            if (GetFileAttributesW(dll) != INVALID_FILE_ATTRIBUTES) return try_load_dir(bundled);
+        }
+    }
 
     HKEY key;
     if (RegOpenKeyExW(HKEY_LOCAL_MACHINE, L"SOFTWARE\\VideoLAN\\VLC", 0,
@@ -692,6 +711,22 @@ static void report_video_size(libvlc_media_t *media, unsigned last[4])
     emit_raw(line);
 }
 
+/* libVLC's media-player settings can override instance-level decoder options.
+ * Keep the user's existing explicit hardware selection effective on the media too. */
+static void apply_media_hardware(libvlc_media_t *media, const char *arguments)
+{
+    if (!arguments) return;
+    char *copy = strdup(arguments);
+    if (!copy) return;
+    for (char *token = strtok(copy, " "); token; token = strtok(NULL, " ")) {
+        if (strncmp(token, "--avcodec-hw=", 13) == 0) {
+            token[1] = ':';
+            vlc.media_add_option(media, token + 1);
+        }
+    }
+    free(copy);
+}
+
 /* Runs on its own thread: libVLC calls can block, and on Windows a blocked
  * window thread would freeze the parent process through the shared input queue. */
 static int run_player(void)
@@ -724,6 +759,7 @@ static int run_player(void)
         vlc.release(inst);
         return 1;
     }
+    apply_media_hardware(media, extra_env);
     if (g_caching >= 0) {
         char option[64];
         snprintf(option, sizeof option, ":network-caching=%d", g_caching);

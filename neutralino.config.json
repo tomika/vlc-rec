@@ -51,7 +51,8 @@
     "copyItems": [
       "/assets",
       "/player",
-      "/vlc_rec_params.json"
+      "/vlc_rec_params.json",
+      "/vlc"
     ]
   }
 }

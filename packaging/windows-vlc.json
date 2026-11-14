@@ -1,0 +1,15 @@
+{
+  "version": "3.0.24",
+  "folder": "vlc-3.0.24",
+  "binary": {
+    "file": "vlc-3.0.24-win64.zip",
+    "url": "https://download.videolan.org/pub/videolan/vlc/3.0.24/win64/vlc-3.0.24-win64.zip",
+    "sha256": "fcf30850371ad10c9373cc4f0f4501e7dee49e3e9ae9f20c72fb2661a1ca6323"
+  },
+  "source": {
+    "file": "vlc-3.0.24.tar.xz",
+    "url": "https://download.videolan.org/pub/videolan/vlc/3.0.24/vlc-3.0.24.tar.xz",
+    "sha256": "e7cab503d1d7d5849b89d2cf0e1ee60d0ef6d012407791b644b9cfc0cc225fdf"
+  },
+  "dependencySources": "https://download.videolan.org/pub/contrib/"
+}

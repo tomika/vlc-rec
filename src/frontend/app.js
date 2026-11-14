@@ -893,7 +893,7 @@ function probeShellCommand(script) {
   // Always route through an explicit shell: the script relies on redirection
   // and '&&', and the SRT URI contains '&'. Being explicit keeps the quoting
   // identical no matter how spawnProcess hands the string to the OS.
-  return NL_OS === "Windows" ? `cmd /c ${script}` : bashInvocation(script);
+  return NL_OS === "Windows" ? `cmd /d /s /c "${script}"` : bashInvocation(script);
 }
 
 async function runSrtProbe(commandLine, watchdogMs) {
@@ -944,9 +944,14 @@ async function verifyWithFfmpeg(address, port) {
   );
 }
 
+async function vlcCommand() {
+  if (NL_OS === "Windows" && await pathExists(`${NL_PATH}/vlc/vlc.exe`)) return `${NL_PATH}/vlc/vlc.exe`;
+  return "vlc";
+}
+
 async function verifyWithVlc(address, port) {
   const uri = buildSrtCallerUri(address, port);
-  const vlc = `vlc --intf dummy --play-and-exit --run-time=2 \"${uri}\" vlc://quit`;
+  const vlc = `${shellQuote(await vlcCommand())} --intf dummy --play-and-exit --run-time=2 \"${uri}\" vlc://quit`;
 
   // VLC has no SRT connect-timeout: on an unreachable host it retries forever
   // and never reaches --run-time, so it must be killed from outside. On unix
@@ -1333,11 +1338,8 @@ async function discoverCameraPlugins() {
 async function setupCameraPlugins() {
   const plugins = await discoverCameraPlugins();
   const selected = String(parameters.camera_plugin || "").trim();
-  if (!selected && plugins.length === 1) parameters.camera_plugin = plugins[0].id;
-  // The original public OSC adapter used this model-specific id. Keep an installed
-  // external adapter with that id; otherwise migrate to the bundled OSC implementation.
-  if (selected === "obsbot-tail2" && !plugins.some((plugin) => plugin.id === selected) &&
-      plugins.some((plugin) => plugin.id === "osc")) parameters.camera_plugin = "osc";
+  // Reuse a configured adapter when available; otherwise a sole usable adapter is unambiguous.
+  if (!plugins.some((plugin) => plugin.id === selected) && plugins.length === 1) parameters.camera_plugin = plugins[0].id;
   cameraPluginItem.hidden = plugins.length < 2;
   const options = [];
   if (!parameters.camera_plugin || !plugins.some((plugin) => plugin.id === parameters.camera_plugin)) {
@@ -3005,7 +3007,7 @@ async function startOperation({ record, ipAddress, outputPathValue, filenameBase
       const startRect = videoRectArg();
       const command = playerPath
         ? buildPlayerCommand(playerPath, streamUri, record, ext, fullOutput, startRect)
-        : buildCommand("vlc", args);
+        : buildCommand(await vlcCommand(), args);
       logDebug(`Launching VLC with command: ${command}`);
       const procInfo = await Neutralino.os.spawnProcess(command);
       currentProcess = {

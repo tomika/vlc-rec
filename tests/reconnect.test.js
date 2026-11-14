@@ -877,19 +877,19 @@ test("camera: discover adapters, select a sole adapter and offer multiple choice
   assert.equal(h.elements.get("cameraPluginSelect").value, "osc");
 });
 
-test("camera: legacy public id migrates only when an external adapter with that id is absent", async () => {
+test("camera: a missing adapter falls back to the sole available one while installed external ids are preserved", async () => {
   const h = harness();
   putAdapter(h, "/app/player/plugins");
-  h.run('parameters.camera_plugin = "obsbot-tail2"');
+  h.run('parameters.camera_plugin = "external-camera"');
   await h.run("setupCameraPlugins()");
   assert.equal(h.run("parameters.camera_plugin"), "osc");
   const external = JSON.parse(pluginManifest);
-  external.id = "obsbot-tail2";
-  h.files.set("/app/plugins/obsbot-tail2/plugin.json", JSON.stringify(external));
-  h.files.set("/app/plugins/obsbot-tail2/osc-win_x64.exe", 1);
-  h.run('parameters.camera_plugin = "obsbot-tail2"');
+  external.id = "external-camera";
+  h.files.set("/app/plugins/external-camera/plugin.json", JSON.stringify(external));
+  h.files.set("/app/plugins/external-camera/osc-win_x64.exe", 1);
+  h.run('parameters.camera_plugin = "external-camera"');
   await h.run("setupCameraPlugins()");
-  assert.equal(h.run("parameters.camera_plugin"), "obsbot-tail2");
+  assert.equal(h.run("parameters.camera_plugin"), "external-camera");
   assert.equal(h.elements.get("cameraPluginItem").hidden, false);
 });
 
@@ -2265,4 +2265,28 @@ test("a recording takes no SRT latency, so a changed one is nothing to note", as
   h.elements.get("previewCaching").change();
   assert.equal(h.elements.get("bufferPending").hidden, false, "the buffer is another matter");
   assert.match(h.elements.get("bufferPendingText").textContent, /recording keeps 500 ms/);
+});
+
+
+test("Windows scan and external playback use the bundled VLC executable", async () => {
+  const h = harness();
+  assert.equal(await h.run("vlcCommand()"), "vlc");
+  h.files.set("/app/vlc/vlc.exe", 1);
+  assert.equal(await h.run("vlcCommand()"), "/app/vlc/vlc.exe");
+  await h.start(false);
+  assert.match(h.launches[0], /\/app\/vlc\/vlc\.exe/);
+});
+
+
+test("Windows scan shell preserves a bundled executable path containing spaces", { skip: process.platform !== "win32" }, async t => {
+  const fs = require("node:fs"), path = require("node:path"), os = require("node:os");
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), "scan executable "));
+  t.after(() => fs.rmSync(dir, { recursive: true, force: true }));
+  const helper = path.join(dir, "probe helper.cmd");
+  fs.writeFileSync(helper, ["@echo off", "exit /b 0", ""].join(String.fromCharCode(13, 10)));
+  const h = harness();
+  const raw = h.run(`probeShellCommand(markerScript(shellQuote(${JSON.stringify(helper)})))`);
+  assert.ok(raw.startsWith("cmd /d /s /c "));
+  const { stdout } = await promisify(execFile)(process.env.ComSpec || "cmd.exe", ["/d", "/s", "/c", raw.slice("cmd /d /s /c ".length)], { windowsVerbatimArguments: true, timeout: 10000 });
+  assert.match(stdout, /SRT_PROBE_OK/);
 });

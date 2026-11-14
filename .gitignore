@@ -8,7 +8,4 @@ neutralinojs.log
 player
 e2e-output
 tests/fixtures/stub
-# Private camera implementations, vendor material and local artifacts.
-/plugins/obsbot-tail2/
-/private-artifacts/
-/protocol/
+/vlc/

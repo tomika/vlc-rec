@@ -18,8 +18,9 @@ This is a NeutralinoJS port of the Python VLC Stream Recorder app.
 
 ## Requirements
 
-- Linux x64 AppImage: no VLC needed, see [Linux AppImage](#linux-appimage). Everything below applies to the other packages.
-- VLC 3 installed. On Debian and Ubuntu also install `vlc-plugin-access-extra`, which provides SRT.
+- Windows x64 release ZIP: includes a pinned portable VLC 3 runtime in `vlc/`; keep that folder beside the app executable when extracting. No separate VLC installation is needed.
+- Linux x64 AppImage: no VLC needed, see [Linux AppImage](#linux-appimage). The remaining VLC installation requirements apply to packages without a bundled runtime.
+- Other packages and development without a bundled runtime: VLC 3 installed. On Debian and Ubuntu also install `vlc-plugin-access-extra`, which provides SRT.
 - Snap and Flatpak installations of VLC do not expose libVLC to the embedded player.
 - On platforms without a player binary (macOS, Linux on ARM), VLC in `PATH`; VLC then opens its own window.
 - Linux: start the app with `run-vlc-rec.sh`. It selects X11 or XWayland, which embedding needs. In development use `GDK_BACKEND=x11 npm start`.
@@ -182,3 +183,5 @@ git push origin v0.1.0
 ### External camera implementations
 
 The release builds contain only adapters listed in `packaging/public-plugins.txt`. See [plugin separation](docs/plugin-separation.md) for public-source boundaries, private development and installation. The generic app interface and AI controls do not implement a vendor protocol.
+
+Windows runtime downloads, licensing/source files and DLL selection are documented in [Windows runtime packaging](docs/windows-runtime.md).

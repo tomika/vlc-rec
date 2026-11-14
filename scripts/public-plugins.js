@@ -19,6 +19,8 @@ function assertPublicPluginTree(dir) {
   }
 }
 function assertPublicInputs(root = ROOT) {
+  const bundledVlc = path.join(root, "vlc");
+  if (fs.existsSync(bundledVlc)) require("./bundle-windows-vlc").assertWindowsRuntime(bundledVlc);
   const runtime = path.join(root, "player");
   if (fs.existsSync(runtime)) for (const entry of fs.readdirSync(runtime, { withFileTypes: true })) {
     if (entry.isSymbolicLink() || !["plugins", "vlc-rec-player-linux_x64", "vlc-rec-player-win_x64.exe"].includes(entry.name)) throw new Error(`Unexpected runtime payload: ${path.join(runtime, entry.name)}`);
