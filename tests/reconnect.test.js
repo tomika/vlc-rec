@@ -2316,6 +2316,20 @@ test("camera: starting a manually edited stream restarts control at the new addr
   assert.equal(cameraRequests(h, "connect").at(-1).params.config.host, "192.168.1.2");
 });
 
+test("camera: confirming a manually edited address reconnects before playback", async () => {
+  const h = cameraHarness();
+  await connectCamera(h);
+  const field = h.elements.get("ip");
+  field.value = "192.168.1.77:5000";
+  field.input();
+  field.change();
+  await h.run("cameraAddressUpdate");
+  assert.equal(h.run("parameters.camera_config.host"), "192.168.1.77");
+  assert.equal(cameraRequests(h, "shutdown").length, 1);
+  await cameraAnswers(h, "hello", { result: {} });
+  assert.equal(cameraRequests(h, "connect").at(-1).params.config.host, "192.168.1.77");
+});
+
 const driveKey = (h, key, action = "keydown", extra = {}) => h.windowEvents.get(action)({
   key, target: { tagName: "BODY" }, preventDefault() {}, ...extra
 });

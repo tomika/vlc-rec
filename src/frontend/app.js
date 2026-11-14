@@ -136,6 +136,7 @@ const CAMERA_CLICK_COOLDOWN_MS = 1000;
 const CAMERA_NUDGE_INTERVAL_MS = 90;
 const CAMERA_DRIVE_TTL_MS = 1000;
 let cameraAddressChanged = false;
+let cameraAddressUpdate = Promise.resolve();
 let cameraDrive = null;
 const cameraHeldKeys = new Map();
 const CAMERA_WHEEL_INTERVAL_MS = 120;
@@ -3011,6 +3012,7 @@ async function monitorStream() {
 }
 
 async function startOperation({ record, ipAddress, outputPathValue, filenameBase, ext, recoverySession = null }) {
+  await cameraAddressUpdate;
   if (!ipAddress) {
     return { ok: false, error: "Please enter the SRT Stream IP Address." };
   }
@@ -3412,6 +3414,15 @@ ip.addEventListener("input", () => {
   if (value) {
     parameters.ip_address = value;
   }
+});
+
+ip.addEventListener("change", () => {
+  const address = ip.value.trim();
+  if (!address) return;
+  cameraAddressUpdate = cameraAddressUpdate.then(() => {
+    if (ip.value.trim() !== address) return;
+    return applySelectedAddress(address);
+  }).catch((err) => logDebug(`Camera address: ${normalizeError(err)}`));
 });
 
 outPath.addEventListener("input", () => {
