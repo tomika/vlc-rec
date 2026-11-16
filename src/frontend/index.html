@@ -57,8 +57,8 @@
               <span>Automatically reconnect if the stream stalls</span>
             </label>
             <label class="preview-control-row buffer-option">
-              <span class="preview-control-label">Preview buffer</span>
-              <input id="previewCaching" class="text-input buffer-input" type="number" min="10" max="10000" step="10" aria-label="Preview buffer in milliseconds" aria-describedby="bufferHint" />
+              <span class="preview-control-label">Preview SRT buffer</span>
+              <input id="previewCaching" class="text-input buffer-input" type="number" min="10" max="10000" step="10" aria-label="Preview SRT buffer in milliseconds" aria-describedby="bufferHint" />
               <span class="preview-control-unit">ms</span>
             </label>
             <label class="preview-control-row buffer-option">
@@ -68,7 +68,7 @@
             </label>
           </div>
           <p id="bufferHint" class="drawer-hint">
-            Applies when the preview starts, not to one that is running. Less buffer means less delay, but too little
+            Applies to the SRT preview when it starts, not to one that is running. Less buffer means less delay, but too little
             freezes the picture. How little works depends on the network and this computer: lower it until the picture
             stutters, then raise it a little.
           </p>

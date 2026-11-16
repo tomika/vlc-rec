@@ -58,6 +58,8 @@ Settings in `vlc_rec_params.json`:
 
 The old `camera_double_click_ms` setting is ignored. Auto gestures use the operating system's native left-button double-click detection; right-button centering has no delay.
 
+**Preview SRT buffer** controls buffering of the SRT picture. It does not affect the **Camera (low latency)** preview.
+
 After confirming SD formatting, a wait dialog shows progress until completion, failure, or timeout. It blocks camera controls and covers the preview while the operation is pending; Escape does not cancel formatting on the camera. The result remains visible in the camera status after the dialog closes.
 
 A camera adapter with a `host` setting uses the saved stream IPv4 address if its configured host is empty. Editing the stream address or choosing a Scan result updates that setting and restarts the adapter.
