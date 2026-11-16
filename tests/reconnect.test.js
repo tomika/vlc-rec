@@ -2680,11 +2680,26 @@ test("camera: telemetry is capability-gated, unknown when stale, and formatting 
   h.os.showMessageBox=async()=>"NO";
   await h.run("formatCameraStorage()");
   assert.equal(cameraRequests(h,"storage.format").length,0);
+  assert.equal(h.elements.get("formatWaitDialog").hidden,true,"declining confirmation never opens the wait dialog");
   h.os.showMessageBox=async()=>"YES";
+  h.run("currentProcess={player:true,id:999,exited:false}");
   h.run("globalThis.formatResult=formatCameraStorage()");await flush();
+  assert.equal(h.elements.get("formatWaitDialog").hidden,false);
+  assert.match(h.elements.get("formatWaitMessage").textContent,/Waiting for the camera to accept/);
+  assert.ok(h.stdin.includes("HIDE\n"),"the native player is hidden behind the modal");
+  let prevented = false;
+  h.windowEvents.get("keydown")({key:"ArrowUp",target:{tagName:"BODY"},preventDefault(){prevented=true;}});
+  h.windowEvents.get("keydown")({key:"Escape",target:{tagName:"BODY"},preventDefault(){}});
+  assert.equal(prevented,false,"format wait does not turn or treat Escape as a cancel command");
+  assert.equal(h.elements.get("formatWaitDialog").hidden,false,"Escape cannot imply cancellation of the camera operation");
+  assert.equal(cameraRequests(h,"ptz.move","ptz.nudge","ptz.centerOn","ai.trackPerson").length,0,"movement shortcuts are blocked while formatting");
+  const showCommands = h.stdin.filter(command => command === "SHOW\n").length;
+  h.run('sendPlayerCommand("SHOW")');
+  assert.equal(h.stdin.filter(command => command === "SHOW\n").length,showCommands,"other display updates cannot uncover native VLC over the wait dialog");
   assert.deepEqual(cameraRequests(h,"storage.format").at(-1).params,{confirmed:true});
   await cameraAnswers(h,"storage.format",{result:{accepted:true}});await h.run("formatResult");
   assert.equal(h.run("cameraFormatting"),true);
+  assert.match(h.elements.get("formatWaitMessage").textContent,/accepted.*in progress/);
   h.fireTimer(1000);await cameraAnswers(h,"telemetry.get",{result:{...fresh,storage:{...fresh.storage,freeBytes:100000}}});
   assert.equal(h.run("cameraFormatting"),true,"a free-space change alone is not proof that formatting completed");
   h.fireTimer(1000);await cameraAnswers(h,"telemetry.get",{result:{...fresh,storage:{...fresh.storage,formatting:false}}});
@@ -2695,6 +2710,8 @@ test("camera: telemetry is capability-gated, unknown when stale, and formatting 
   h.fireTimer(1000);await cameraAnswers(h,"telemetry.get",{result:{...fresh,storage:{...fresh.storage,status:"preparing"}}});
   h.fireTimer(1000);await cameraAnswers(h,"telemetry.get",{result:{...fresh,storage:{...fresh.storage,status:"ready",freeBytes:100000}}});
   assert.equal(h.run("cameraFormatting"),false);
+  assert.equal(h.elements.get("formatWaitDialog").hidden,true,"confirmed completion closes the wait dialog");
+  assert.ok(h.stdin.includes("SHOW\n"),"the native player is restored after the modal closes");
   assert.match(h.elements.get("cameraStorageStatus").textContent,/completed/);
   assert.match(h.run("cameraNote"),/SD formatting completed/,"result is also surfaced in the visible camera status");
   h.fireTimer(1000);await cameraAnswers(h,"telemetry.get",{result:{...fresh,recording:true}});
@@ -2870,6 +2887,7 @@ test("camera: a late format acknowledgement cannot overwrite connection-loss fee
   cameraSays(h, {event:"state",state:"lost",reason:"connection lost"});
   const message = h.elements.get("cameraStorageStatus").textContent;
   assert.match(message,/completion could not be confirmed/);
+  assert.equal(h.elements.get("formatWaitDialog").hidden,true,"connection loss closes the wait dialog");
   await cameraAnswers(h,"storage.format",{result:{accepted:true}}); await pending;
   assert.equal(h.elements.get("cameraStorageStatus").textContent,message);
   assert.equal(h.run("cameraFormatting"),false);
@@ -2888,6 +2906,43 @@ test("camera: two overlapping format confirmations send only one erase request",
   assert.equal(cameraRequests(h,"storage.format").length,1);
   await cameraAnswers(h,"storage.format",{result:{accepted:true}}); await first;
   assert.equal(h.run("cameraFormatting"),true);
+});
+
+test("camera: stopping the adapter closes the format wait dialog without canceling the camera command", async () => {
+  const h = cameraHarness();
+  await connectCamera(h, { ...FULL_CAPS, telemetry:{storage:true}, storage:{format:true} });
+  await cameraAnswers(h,"telemetry.get",{result:{fresh:true,recording:false,storage:{status:"ready",totalBytes:4096,freeBytes:2048}}});
+  h.os.showMessageBox=async()=>"YES";
+  h.run("globalThis.formatPromise=formatCameraStorage()"); await flush();
+  assert.equal(h.elements.get("formatWaitDialog").hidden,false);
+  h.run("stopCamera()");
+  assert.equal(h.elements.get("formatWaitDialog").hidden,true);
+  assert.equal(h.run("cameraFormatting"),false);
+  assert.equal(cameraRequests(h,"storage.format").length,1,"closing the UI does not send a second format or cancel command");
+});
+
+test("camera: rejected and failed formatting release the modal and leave the error visible", async () => {
+  for (const accepted of [false, true]) {
+    const h = cameraHarness();
+    await connectCamera(h, { ...FULL_CAPS, telemetry:{storage:true}, storage:{format:true} });
+    const fresh = {fresh:true,recording:false,storage:{status:"ready",totalBytes:4096,freeBytes:2048}};
+    await cameraAnswers(h,"telemetry.get",{result:fresh});
+    h.os.showMessageBox=async()=>"YES";
+    h.run("globalThis.formatPromise=formatCameraStorage()"); await flush();
+    assert.equal(h.elements.get("formatWaitDialog").hidden,false);
+    if (accepted) {
+      await cameraAnswers(h,"storage.format",{result:{accepted:true}}); await h.run("formatPromise");
+      h.fireTimer(1000);
+      await cameraAnswers(h,"telemetry.get",{result:{...fresh,storage:{...fresh.storage,status:"error",formatFailed:true}}});
+      assert.match(h.elements.get("cameraStorageStatus").textContent,/SD formatting failed/);
+    } else {
+      await cameraAnswers(h,"storage.format",{error:{code:"device_error",message:"Card unavailable"}}); await h.run("formatPromise");
+      assert.match(h.elements.get("cameraStorageStatus").textContent,/not accepted.*Card unavailable/);
+    }
+    assert.equal(h.run("cameraFormatting"),false);
+    assert.equal(h.elements.get("formatWaitDialog").hidden,true);
+    assert.equal(h.elements.get("layout").inert,false,"failure unlocks the application");
+  }
 });
 
 test("camera: format blocks record start and power off until its result", async () => {
@@ -2920,6 +2975,7 @@ test("camera: format timeout is reported even when telemetry polling fails", asy
   h.fireTimer(1000);
   await cameraAnswers(h,"telemetry.get",{error:{code:"offline",message:"telemetry unavailable"}});
   assert.equal(h.run("cameraFormatting"),false);
+  assert.equal(h.elements.get("formatWaitDialog").hidden,true,"timeout closes the wait dialog");
   assert.match(h.elements.get("cameraStorageStatus").textContent,/could not be confirmed/);
   assert.match(h.run("cameraNote"),/could not be confirmed/);
 });

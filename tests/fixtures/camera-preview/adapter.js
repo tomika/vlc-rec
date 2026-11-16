@@ -16,6 +16,7 @@ let frameNumber = 0;
 let cameraRecording = false;
 let cameraPowerOn = true;
 let cameraZoom = 0.25;
+let cameraFormatStartedAt = 0;
 
 function splitAccessUnits(bytes) {
   const nals = [];
@@ -195,7 +196,8 @@ function handle(request) {
         zoom: { absolute: true },
         telemetry: { pollMs: 500, battery: true, storage: true, recording: true, power: true },
         record: { start: true, stop: true },
-        power: { on: true, off: true, mode: "remote" }
+        power: { on: true, off: true, mode: "remote" },
+        storage: { format: true }
       } });
     case "preview.open":
       return openPreview(id);
@@ -203,14 +205,23 @@ function handle(request) {
       closePreview();
       return reply(id, {});
     case "telemetry.get":
-      return reply(id, {
-        fresh: true,
-        battery: { present: true, level: 0.75, charging: false },
-        storage: { status: "ready", format: "fixture", totalBytes: 1000000, freeBytes: 750000, remainingSeconds: 3600 },
-        recording: cameraRecording,
-        power: { on: cameraPowerOn },
-        zoom: { value: cameraZoom }
-      });
+      {
+        const elapsed = cameraFormatStartedAt ? Date.now() - cameraFormatStartedAt : Infinity;
+        const formatting = elapsed < 1800;
+        const status = elapsed < 700 ? "preparing" : elapsed < 1800 ? "initializing" : "ready";
+        return reply(id, {
+          fresh: true,
+          battery: { present: true, level: 0.75, charging: false },
+          storage: {
+            status: status === "preparing" || status === "initializing" ? status : "ready",
+            format: "fixture", totalBytes: 1000000, freeBytes: 750000, remainingSeconds: 3600,
+            formatting, formatCompleted: cameraFormatStartedAt > 0 && !formatting, formatFailed: false
+          },
+          recording: cameraRecording,
+          power: { on: cameraPowerOn },
+          zoom: { value: cameraZoom }
+        });
+      }
     case "zoom.get":
       return reply(id, { value: cameraZoom });
     case "zoom.set":
@@ -227,6 +238,12 @@ function handle(request) {
       return reply(id, { accepted: true });
     case "power.set":
       cameraPowerOn = request.params?.on === true;
+      return reply(id, { accepted: true });
+    case "storage.format":
+      if (request.params?.confirmed !== true) {
+        return process.stdout.write(`${JSON.stringify({ id, error: { code: "invalid_params", message: "storage.format requires confirmation." } })}\n`);
+      }
+      cameraFormatStartedAt = Date.now();
       return reply(id, { accepted: true });
     case "shutdown":
       closePreview();

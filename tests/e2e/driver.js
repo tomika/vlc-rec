@@ -365,6 +365,36 @@ const E2E_SCENARIO = "__SCENARIO__";
       const recordedFile = outputFile;
       const sizeOfRecording = async () => (await Neutralino.filesystem.getStats(recordedFile).catch(() => ({ size: 0 }))).size;
       await waitFor("browser preview: SRT recording file grows", async () => (await sizeOfRecording()) > 0);
+      // The fixture reports a short preparing/initializing sequence, then a confirmed ready state.
+      // Keep native VLC recording so this also exercises hiding and restoring the child window.
+      let formatConfirmationSeen = false;
+      const showMessageBox = Neutralino.os.showMessageBox.bind(Neutralino.os);
+      const updateSpawnedProcess = Neutralino.os.updateSpawnedProcess.bind(Neutralino.os);
+      const formatPlayerCommands = [];
+      Neutralino.os.showMessageBox = async (title, ...args) => {
+        if (title === "Format SD card") { formatConfirmationSeen = true; return "YES"; }
+        return showMessageBox(title, ...args);
+      };
+      Neutralino.os.updateSpawnedProcess = async (id, action, data) => {
+        if (id === recordedPlayer && action === "stdIn") formatPlayerCommands.push(data);
+        return updateSpawnedProcess(id, action, data);
+      };
+      const formatPromise = formatCameraStorage();
+      await waitFor("camera format: erase confirmation requested", () => formatConfirmationSeen);
+      await waitFor("camera format: wait dialog opens over native VLC", () => !formatWaitDialog.hidden);
+      check("camera format: progress dialog is accessible and blocks the page", formatWaitDialog.getAttribute("aria-modal") === "true" &&
+        layoutEl.inert && !currentProcess?.exited && currentProcess?.player &&
+        /waiting for the camera|formatting(?: the SD card)?/i.test(formatWaitMessage.textContent), formatWaitMessage.textContent);
+      check("camera format: native VLC is hidden behind the dialog", formatPlayerCommands.includes("HIDE\n"), formatPlayerCommands.join(""));
+      await shot("camera-format-wait", "any", 200);
+      await formatPromise;
+      await waitFor("camera format: wait dialog closes after completion", () => formatWaitDialog.hidden, 6000);
+      check("camera format: completion status remains visible", /SD formatting completed/.test(cameraStorageStatus.textContent), cameraStorageStatus.textContent);
+      check("camera format: focus state is restored", !layoutEl.inert);
+      check("camera format: native SRT recording continues", mode === "recording" && currentProcess?.id === recordedPlayer && outputFile === recordedFile);
+      check("camera format: native VLC is restored after the dialog closes", formatPlayerCommands.includes("SHOW\n"), formatPlayerCommands.join(""));
+      Neutralino.os.showMessageBox = showMessageBox;
+      Neutralino.os.updateSpawnedProcess = updateSpawnedProcess;
       const recordingContinues = async (label, previousSize) => {
         await waitFor(`${label}: recording file keeps growing`, async () => (await sizeOfRecording()) > previousSize);
         check(`${label}: same recording player and file`, mode === "recording" && currentProcess?.id === recordedPlayer && outputFile === recordedFile,

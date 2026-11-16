@@ -974,6 +974,70 @@ body {
   z-index: 30;
 }
 
+/* Native WebKit scrollbars can paint above fixed page overlays. */
+.layout[inert] .panel {
+  overflow: hidden;
+}
+
+.format-wait-dialog {
+  position: fixed;
+  inset: 0;
+  z-index: 40;
+  display: grid;
+  place-items: center;
+  padding: 20px;
+  background: rgba(9, 14, 20, 0.76);
+}
+
+.format-wait-dialog[hidden] {
+  display: none !important;
+}
+
+.format-wait-card {
+  width: min(420px, 100%);
+  padding: 28px 30px;
+  border: 1px solid #526c83;
+  border-radius: 12px;
+  background: linear-gradient(180deg, #3d566e 0%, #31465b 100%);
+  box-shadow: 0 16px 48px rgba(0, 0, 0, 0.42);
+  text-align: center;
+}
+
+.format-wait-card h2 {
+  margin: 12px 0 8px;
+  font-size: 18px;
+}
+
+.format-wait-card p {
+  margin: 0;
+  color: #e1e8ee;
+  line-height: 1.45;
+}
+
+.format-wait-card .format-wait-hint {
+  margin-top: 10px;
+  color: #b8c3cf;
+  font-size: 12px;
+}
+
+.format-wait-spinner {
+  display: inline-block;
+  width: 30px;
+  height: 30px;
+  border: 3px solid rgba(226, 236, 244, 0.24);
+  border-top-color: #6ec1f3;
+  border-radius: 50%;
+  animation: format-wait-spin 0.85s linear infinite;
+}
+
+@keyframes format-wait-spin {
+  to { transform: rotate(360deg); }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .format-wait-spinner { animation-duration: 2.5s; }
+}
+
 .scan-dialog[hidden] {
   display: none !important;
 }

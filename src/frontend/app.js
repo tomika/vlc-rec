@@ -63,6 +63,8 @@ const cameraRecordBtn = document.getElementById("cameraRecordBtn");
 const cameraPowerBtn = document.getElementById("cameraPowerBtn");
 const cameraFormatBtn = document.getElementById("cameraFormatBtn");
 const cameraStorageStatus = document.getElementById("cameraStorageStatus");
+const formatWaitDialog = document.getElementById("formatWaitDialog");
+const formatWaitMessage = document.getElementById("formatWaitMessage");
 let browserPreview = null;
 let browserPreviewFailed = false;
 let browserPreviewFailure = "";
@@ -578,7 +580,7 @@ function closeScanDialog() {
   setScanProgress("Idle.");
   resetScanVisuals();
   scanDialog.hidden = true;
-  sendPlayerCommand("SHOW");
+  if (formatWaitDialog.hidden) sendPlayerCommand("SHOW");
 }
 
 async function showError(text) {
@@ -1746,6 +1748,7 @@ function stopCamera() {
   telemetryGeneration += 1;
   cameraTelemetryValue = null;
   cameraFormatting = false;
+  closeFormatWaitDialog();
   const proc = cameraProc;
   if (!proc || proc.exited) return;
   proc.stopping = true;
@@ -1895,7 +1898,7 @@ function handleCameraProcessEvent(evt) {
 
 // x and y: where the click fell on the picture, 0..1 from its top left corner.
 function turnCameraTo(x, y) {
-  if (!cameraCan("centerOn") || mode === "idle" || !scanDialog.hidden) return;
+  if (!cameraCan("centerOn") || mode === "idle" || !scanDialog.hidden || !formatWaitDialog.hidden) return;
   if (!(x >= 0 && x <= 1 && y >= 0 && y <= 1)) return;
   // A click in the middle needs no turn.
   if (Math.abs(x - 0.5) < 0.02 && Math.abs(y - 0.5) < 0.02) return;
@@ -1927,7 +1930,7 @@ function videoPoint(evt) {
 }
 
 function toggleCameraAiAt(point) {
-  if (!point || !cameraCan("trackPerson") || mode === "idle" || !scanDialog.hidden) return;
+  if (!point || !cameraCan("trackPerson") || mode === "idle" || !scanDialog.hidden || !formatWaitDialog.hidden) return;
   const params = { x: Number(point.x.toFixed(4)), y: Number(point.y.toFixed(4)) };
   if (!cameraCan("trackStatus")) return sendCameraRequest("ai.trackPerson", params);
   const proc = cameraProc;
@@ -2003,7 +2006,7 @@ function handleCameraLetterKey(evt) {
 
 // A wheel notch is half a button step. Wheel up zooms in.
 function handleStageWheel(evt) {
-  if (!cameraCan("zoom") || !scanDialog.hidden) return;
+  if (!cameraCan("zoom") || !scanDialog.hidden || !formatWaitDialog.hidden) return;
   evt.preventDefault();
   const now = Date.now();
   if (now - lastWheelAt < CAMERA_WHEEL_INTERVAL_MS) return;
@@ -2082,12 +2085,17 @@ function stopCameraDrive() {
 }
 
 function handleKeyUp(evt) {
+  if (!formatWaitDialog.hidden) return;
   if (!cameraHeldKeys.delete(evt.key)) return;
   evt.preventDefault();
   updateCameraDrive();
 }
 
 function handleKeyDown(evt) {
+  if (!formatWaitDialog.hidden) {
+    stopCameraDrive();
+    return;
+  }
   if (evt.key === "Escape" || isTypingTarget(evt) || evt.ctrlKey || evt.altKey || evt.metaKey) stopCameraDrive();
   if (evt.key === "Escape") {
     if (!scanDialog.hidden) {
@@ -2462,7 +2470,7 @@ function stopBrowserPreview() {
     closePresetMenu();
     renderPresets();
     if (currentProcess?.srtVideoSize) setVideoSize(currentProcess.srtVideoSize);
-    if (scanDialog.hidden && presetMenu.hidden) sendPlayerCommand("SHOW");
+    if (scanDialog.hidden && presetMenu.hidden && formatWaitDialog.hidden) sendPlayerCommand("SHOW");
   }
 }
 
@@ -2714,7 +2722,10 @@ function startCameraTelemetry(proc) {
       observeCameraAction(proc, value, actionGeneration);
       if (cameraFormatting && formatGeneration === proc.formatGeneration) {
         const state = value.fresh === true ? value.storage?.status : null;
-        if (value.fresh === true && (state === "preparing" || state === "initializing" || value.storage?.formatting === true)) proc.formatSawBusy = true;
+        if (value.fresh === true && (state === "preparing" || state === "initializing" || value.storage?.formatting === true)) {
+          proc.formatSawBusy = true;
+          setFormatWaitMessage("The camera is formatting the SD card…");
+        }
         if (value.fresh === true && value.storage?.formatFailed === true) proc.formatFailedObserved = true;
         if ((value.fresh === true && value.storage?.formatCompleted === true) ||
           (state === "ready" && proc.formatSawBusy)) proc.formatCompleteObserved = true;
@@ -2739,6 +2750,7 @@ async function formatCameraStorage() {
     "All files on the camera's SD card will be permanently deleted. Format the card?", "YES_NO", "WARNING");
   if (choice !== "YES" || cameraProc !== proc || !cameraStorageCanFormat()) return;
   cameraFormatting = true;
+  openFormatWaitDialog("Waiting for the camera to accept the format request…");
   const formatGeneration = proc.formatGeneration = (proc.formatGeneration || 0) + 1;
   proc.formatStartedAt = Date.now();
   proc.formatSawBusy = false;
@@ -2754,15 +2766,20 @@ async function formatCameraStorage() {
     proc.formatAccepted = true;
     if (proc.formatFailedObserved) finishCameraFormatting(proc, false);
     else if (proc.formatCompleteObserved) finishCameraFormatting(proc, true);
-    else cameraStorageStatus.textContent = "Formatting accepted; waiting for updated card status…";
+    else {
+      cameraStorageStatus.textContent = "Formatting accepted; waiting for updated card status…";
+      setFormatWaitMessage("The camera accepted the request. Formatting is in progress…");
+    }
   } catch (error) {
     if (cameraProc !== proc || !cameraFormatting || proc.formatGeneration !== formatGeneration) return;
     cameraFormatting = false;
     const message = `SD formatting was not accepted: ${normalizeError(error)}`;
     cameraStorageStatus.textContent = message;
     setCameraNote(message);
+    closeFormatWaitDialog();
   }
   showCameraTelemetry();
+  if (formatWaitDialog.hidden) cameraFormatBtn.focus();
 }
 
 function finishCameraFormatting(proc, result) {
@@ -2773,7 +2790,33 @@ function finishCameraFormatting(proc, result) {
       : "Formatting completion could not be confirmed. Check the camera.";
   cameraStorageStatus.textContent = message;
   setCameraNote(message);
+  closeFormatWaitDialog();
   showCameraTelemetry();
+  if (formatWaitDialog.hidden) cameraFormatBtn.focus();
+}
+
+function setFormatWaitMessage(message) {
+  formatWaitMessage.textContent = message;
+}
+
+function openFormatWaitDialog(message) {
+  stopCameraDrive();
+  clearVideoPointer();
+  closePresetMenu();
+  setFormatWaitMessage(message);
+  layoutEl.inert = true;
+  presetMenu.inert = true;
+  formatWaitDialog.hidden = false;
+  formatWaitDialog.focus();
+  sendPlayerCommand("HIDE");
+}
+
+function closeFormatWaitDialog() {
+  if (formatWaitDialog.hidden) return;
+  formatWaitDialog.hidden = true;
+  layoutEl.inert = false;
+  presetMenu.inert = false;
+  if (scanDialog.hidden && presetMenu.hidden) sendPlayerCommand("SHOW");
 }
 
 function videoRectArg() {
@@ -2894,7 +2937,7 @@ function buildPlayerCommand(playerPath, streamUri, record, ext, fullOutput, rect
 function sendPlayerCommand(line) {
   const proc = currentProcess;
   if (!proc || !proc.player || proc.exited) return;
-  if (line === "SHOW" && browserPreview) line = "HIDE";
+  if (line === "SHOW" && (browserPreview || !formatWaitDialog.hidden)) line = "HIDE";
   Neutralino.os.updateSpawnedProcess(proc.id, "stdIn", `${line}\n`).catch(() => {});
 }
 
@@ -3650,7 +3693,7 @@ async function startOperation({ record, ipAddress, outputPathValue, filenameBase
       // The layout may have changed while the process was starting.
       syncPlayerRect();
       // A reconnect can start a player while the scan dialog covers the window.
-      if (!scanDialog.hidden) sendPlayerCommand("HIDE");
+      if (!scanDialog.hidden || !formatWaitDialog.hidden) sendPlayerCommand("HIDE");
     }
   } catch (err) {
     startingStream = false;

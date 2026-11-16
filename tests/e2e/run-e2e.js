@@ -319,12 +319,12 @@ function prepareApp(scenario) {
     }
   }
   if (scenario === "camera-ai") {
-    const target = path.join(app, "player", "plugins", "camera-ai");
+    const target = path.join(app, "plugins", "camera-ai");
     fs.cpSync(path.join(repo, "tests", "fixtures", "camera-ai"), target, { recursive: true });
     fs.chmodSync(path.join(target, "run.sh"), 0o755);
   }
   if (scenario === "browser-preview") {
-    const target = path.join(app, "player", "plugins", "camera-preview");
+    const target = path.join(app, "plugins", "camera-preview");
     fs.cpSync(path.join(repo, "tests", "fixtures", "camera-preview"), target, { recursive: true });
     fs.copyFileSync(path.join(repo, "tests", "fixtures", "preview-decoder.hevc"), path.join(target, "preview-decoder.hevc"));
     fs.chmodSync(path.join(target, "run.sh"), 0o755);
