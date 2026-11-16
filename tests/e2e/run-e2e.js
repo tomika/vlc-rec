@@ -98,7 +98,7 @@ function cameraCommands() {
   };
 }
 
-// What reached the fake camera. A click right of the middle at zoom 0 and a level camera:
+// What reached the fake camera. A right click right of the middle at zoom 0 and a level camera:
 // u = 0.5 and a field of view of 76 degrees: atan(tan(38 deg) * 0.5) = 21.3 degrees to the right,
 // so the pan value goes to about -21.
 function cameraChecks() {
@@ -112,10 +112,11 @@ function cameraChecks() {
   const starts = drive.filter(l => !l.endsWith("[0]"));
   const stops = drive.filter(l => l.endsWith("[0]"));
   return [
-    { name: "click on the picture turned the camera to the right", ok: Boolean(first) && near(first[1], -21) && near(first[2], 0), detail: JSON.stringify(first) },
+    { name: "single right click on the picture turned the camera to the right", ok: Boolean(first) && near(first[1], -21) && near(first[2], 0), detail: JSON.stringify(first) },
+    { name: "C centers from its current pointer location", ok: turns.length === 2 && turns.slice(1).every((turn) => Number.isFinite(turn[1]) && Number.isFinite(turn[2])), detail: JSON.stringify(turns) },
     { name: "mouse wheel up zoomed in", ok: zooms.includes(2), detail: JSON.stringify(zooms) },
     { name: "held right key starts one continuous pan", ok: starts.length === 2 && starts[0].includes("SetGimbalRight [20]"), detail: JSON.stringify(drive) },
-    { name: "held up key starts one continuous tilt and both releases stop", ok: starts.length === 2 && starts[1].includes("SetGimbalUp [20]") && stops.length === 2 && turns.length === 1, detail: JSON.stringify(drive) }
+    { name: "held up key starts one continuous tilt and both releases stop", ok: starts.length === 2 && starts[1].includes("SetGimbalUp [20]") && stops.length === 2 && turns.length === 2, detail: JSON.stringify(drive) }
   ];
 }
 
@@ -322,6 +323,12 @@ function prepareApp(scenario) {
     fs.cpSync(path.join(repo, "tests", "fixtures", "camera-ai"), target, { recursive: true });
     fs.chmodSync(path.join(target, "run.sh"), 0o755);
   }
+  if (scenario === "browser-preview") {
+    const target = path.join(app, "player", "plugins", "camera-preview");
+    fs.cpSync(path.join(repo, "tests", "fixtures", "camera-preview"), target, { recursive: true });
+    fs.copyFileSync(path.join(repo, "tests", "fixtures", "preview-decoder.hevc"), path.join(target, "preview-decoder.hevc"));
+    fs.chmodSync(path.join(target, "run.sh"), 0o755);
+  }
   return { app, binary: path.join(app, binaryName) };
 }
 
@@ -335,6 +342,7 @@ async function runScenario(scenario, env) {
   // E2E_PARAMS (a JSON object) is merged into the settings file of every scenario.
   const params = { ...(scenario === "camera" ? { camera_plugin: "osc", camera_config: { host: "127.0.0.1" } } : {}), ...(process.env.E2E_PARAMS ? JSON.parse(process.env.E2E_PARAMS) : {}) };
   if (scenario === "camera-ai") Object.assign(params, { camera_plugin: "camera-ai" });
+  if (scenario === "browser-preview") Object.assign(params, { camera_plugin: "camera-preview", camera_config: {} });
   if (Object.keys(params).length) fs.writeFileSync(path.join(app, "vlc_rec_params.json"), JSON.stringify(params));
   if (scenario === "camera") {
     startFakeCamera();
@@ -447,6 +455,7 @@ async function main() {
     await runScenario("aspect", baseEnv);
     await runScenario("camera", baseEnv);
     await runScenario("camera-ai", baseEnv);
+    await runScenario("browser-preview", baseEnv);
     await runScenario("motion", baseEnv);
     await runScenario("closewhile", baseEnv);
     await runScenario("hardkill", baseEnv);

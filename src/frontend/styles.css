@@ -88,6 +88,20 @@ body {
   text-align: center;
 }
 
+.camera-preview-canvas {
+  display: block;
+  width: 100%;
+  height: 100%;
+  object-fit: contain;
+}
+
+.camera-preview-canvas[hidden] { display: none; }
+.video-host.ai-tracking .camera-preview-canvas { width: calc(100% - 8px); height: calc(100% - 8px); }
+.camera-telemetry { display: flex; flex-direction: column; gap: 6px; font-size: 12px; }
+.camera-telemetry[hidden], #previewSourceItem[hidden] { display: none; }
+.camera-telemetry .btn { align-self: flex-start; }
+.camera-action-row { display: flex; flex-wrap: wrap; gap: 6px; }
+
 /* ---- the panel: the bar, which is always there, and the drawer, which the settings button folds away ----
    Beside the video: [bar | drawer]. Below the video: the drawer above the bar. */
 .panel {
@@ -592,36 +606,72 @@ body {
   white-space: nowrap;
 }
 
-/* The two options share a line where there is room. */
-.options-group {
-  display: flex;
-  flex-wrap: wrap;
+/* Keep preview labels, inputs, and units aligned at both drawer widths. */
+.preview-settings {
+  --preview-settings-columns: minmax(0, 40%) minmax(0, 1fr) auto;
+  display: grid;
+  grid-template-columns: var(--preview-settings-columns);
   align-items: center;
-  gap: 8px 24px;
+  gap: 8px 10px;
   font-size: 13px;
 }
 
-.reconnect-option,
-.buffer-option {
-  display: flex;
+.preview-control-row {
+  display: grid;
+  grid-column: 1 / -1;
+  grid-template-columns: var(--preview-settings-columns);
   align-items: center;
-  gap: 8px;
-  font-size: 13px;
+  gap: 10px;
+  min-width: 0;
+  min-height: 34px;
+}
+
+#previewSourceStatus { grid-column: 1 / -1; }
+
+.preview-control-label {
+  min-width: 0;
+}
+
+#previewSourceItem .select-input {
+  grid-column: 2 / -1;
+  width: 100%;
+  min-width: 0;
 }
 
 .reconnect-option {
+  display: flex;
+  grid-column: 1 / -1;
+  align-items: flex-start;
+  gap: 8px;
+  min-width: 0;
   cursor: pointer;
 }
 
+.reconnect-option span {
+  min-width: 0;
+}
+
 .reconnect-option input {
-  margin: 0;
+  flex: 0 0 auto;
+  margin: 2px 0 0;
   accent-color: var(--blue);
 }
 
-.buffer-option .buffer-input {
-  width: 84px;
-  padding: 4px 6px;
+.buffer-option {
   font-size: 13px;
+}
+
+.buffer-option .buffer-input {
+  width: 100%;
+  min-width: 0;
+  box-sizing: border-box;
+  min-height: 34px;
+  padding: 8px 6px;
+  font-size: 13px;
+}
+
+.preview-control-unit {
+  white-space: nowrap;
 }
 
 .drawer-hint {

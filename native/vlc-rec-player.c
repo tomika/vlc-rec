@@ -225,6 +225,15 @@ static void json_escape(char *dst, size_t cap, const char *src)
     dst[o] = 0;
 }
 
+/* strdup is POSIX rather than ISO C; keep these copies usable with MSVC's C11 mode. */
+static char *duplicate_string(const char *src)
+{
+    size_t n = strlen(src) + 1;
+    char *copy = malloc(n);
+    if (copy) memcpy(copy, src, n);
+    return copy;
+}
+
 static void emit_error(const char *code, const char *fmt, ...)
 {
     char message[512], escaped[1100], line[1300];
@@ -796,7 +805,7 @@ static void report_video_size(libvlc_media_t *media, unsigned last[4])
 static void apply_media_hardware(libvlc_media_t *media, const char *arguments)
 {
     if (!arguments) return;
-    char *copy = strdup(arguments);
+    char *copy = duplicate_string(arguments);
     if (!copy) return;
     for (char *token = strtok(copy, " "); token; token = strtok(NULL, " ")) {
         if (strncmp(token, "--avcodec-hw=", 13) == 0) {
@@ -820,7 +829,7 @@ static int run_player(void)
     args[argc++] = "--no-video-on-top";
 #endif
     const char *extra_env = getenv("VLC_REC_VLC_ARGS");
-    char *extra = extra_env ? strdup(extra_env) : NULL;
+    char *extra = extra_env ? duplicate_string(extra_env) : NULL;
     if (extra) {
         for (char *token = strtok(extra, " "); token && argc < 24; token = strtok(NULL, " ")) {
             args[argc++] = token;

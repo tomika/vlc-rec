@@ -969,7 +969,7 @@ test("camera: the adapter is found by its manifest and started in its folder; th
   await cameraAnswers(h, "connect", { result: { capabilities: FULL_CAPS } });
   assert.equal(h.elements.get("cameraBar").hidden, false);
   assert.equal(h.elements.get("layout").dataset.camera, "on");
-  assert.deepEqual(cameraRequests(h, "ptz.setSpeed").map((r) => r.params), [{ value: 10 }], "the speed of the app goes to the adapter");
+  assert.deepEqual(cameraRequests(h, "ptz.setSpeed").map((r) => r.params), [{ value: 23 }], "25% maps into the legacy adapter's range");
 });
 
 test("camera: no adapter chosen, an unknown or an unusable one leaves the feature off", async () => {
@@ -1089,18 +1089,18 @@ test("camera: a click turns the camera, a second one waits, the middle and an id
   await connectCamera(h);
   const turns = () => cameraRequests(h, "ptz.centerOn");
   // The video box of the harness is 640x360 at (10, 20); the stream aspect is 16:9.
-  h.run("handleVideoClick({ clientX: 490, clientY: 200 })");
+  h.run("handleRightCameraClick({ clientX: 490, clientY: 200 })");
   assert.deepEqual(turns(), [], "nothing is turned while no stream runs");
 
   assert.equal((await h.start(false)).ok, true);
-  h.run("handleVideoClick({ clientX: 490, clientY: 200 })");
+  h.run("handleRightCameraClick({ clientX: 490, clientY: 200 })");
   assert.deepEqual(turns().map((r) => r.params), [{ x: 0.75, y: 0.5, aspect: 1.7778 }]);
-  h.run("handleVideoClick({ clientX: 100, clientY: 100 })");
+  h.run("handleRightCameraClick({ clientX: 100, clientY: 100 })");
   assert.equal(turns().length, 1, "a click right after a turn aims at an out of date picture");
   h.advance(1100);
-  h.run("handleVideoClick({ clientX: 330, clientY: 200 })");
+  h.run("handleRightCameraClick({ clientX: 330, clientY: 200 })");
   assert.equal(turns().length, 1, "the middle needs no turn");
-  h.run("handleVideoClick({ clientX: 10, clientY: 20 })");
+  h.run("handleRightCameraClick({ clientX: 10, clientY: 20 })");
   assert.deepEqual(turns()[1].params, { x: 0, y: 0, aspect: 1.7778 });
 });
 
@@ -1109,60 +1109,78 @@ test("camera: the aspect ratio of the stream goes with the click", async () => {
   await connectCamera(h);
   await h.start(false);
   h.run("videoAspect = 4 / 3");
-  h.run("handleVideoClick({ clientX: 650, clientY: 380 })");
+  h.run("handleRightCameraClick({ clientX: 650, clientY: 380 })");
   assert.deepEqual(cameraRequests(h, "ptz.centerOn").map((r) => r.params), [{ x: 1, y: 1, aspect: 1.3333 }]);
 });
 
-test("camera: a double click selects a person without turning on the first click", async () => {
+test("camera: a left double click selects a person while a left single click never turns", async () => {
   const h = cameraHarness();
   await connectCamera(h, { ...FULL_CAPS, ai: { trackPerson: true } });
   await h.start(false);
-  h.run("handleVideoClick({ clientX: 170, clientY: 290, detail: 1 })");
-  h.run("handleVideoClick({ clientX: 170, clientY: 290, detail: 2 })");
-  h.run("handleVideoDoubleClick({ clientX: 170, clientY: 290 })");
-  h.fireTimer(300);
+  h.run("handleVideoMouseDown({ button: 0, clientX: 170, clientY: 290 }); handleVideoMouseUp({ button: 0, clientX: 170, clientY: 290 })");
+  assert.equal(cameraRequests(h, "ai.trackPerson", "ptz.centerOn").length, 0);
+  h.elements.get("videoHost").dblclick({ button: 0, clientX: 170, clientY: 290 });
   assert.equal(cameraRequests(h, "ptz.centerOn").length, 0);
   assert.deepEqual(cameraRequests(h, "ai.trackPerson").map(r => r.params), [{ x: 0.25, y: 0.75 }]);
-  h.run("handleVideoClick({ clientX: 490, clientY: 200, detail: 1 })");
-  h.fireTimer(300);
+  h.run("handleRightCameraClick({ clientX: 490, clientY: 200, detail: 1 })");
   assert.deepEqual(cameraRequests(h, "ptz.centerOn").map(r => r.params), [{ x: 0.75, y: 0.5, aspect: 1.7778 }]);
-  h.run("handleVideoDoubleClick({ clientX: 1000, clientY: 200 })");
+  h.run("handleVideoDoubleClick({ button: 0, clientX: 1000, clientY: 200 })");
   assert.equal(cameraRequests(h, "ai.trackPerson").length, 1);
 });
 
-test("camera: double-click interval is configurable, saved with presets, and limits late clicks", async () => {
+test("camera: right clicks centre immediately and right double clicks never toggle AI", async () => {
+  const h = cameraHarness();
+  await connectCamera(h, { ...FULL_CAPS, ai: { trackPerson: true, status: true, stop: true } });
+  await h.start(false);
+  h.run("handleCameraProcessEvent({ detail: { id: cameraProc.id, action: 'stdOut', data: '' } })");
+  h.run("handleVideoMouseUp({ button: 0, clientX: 490, clientY: 200 })");
+  h.run("handleVideoContextMenu({ button: 0, clientX: 490, clientY: 200, preventDefault() {} })");
+  assert.equal(cameraRequests(h, "ptz.centerOn").length, 0);
+  h.run("handleRightCameraClick({ clientX: 490, clientY: 200 })");
+  assert.equal(cameraRequests(h, "ptz.centerOn").length, 1, "the first right click centres without a timer");
+  h.run("cameraProc.aiEnabled = false; handleRightCameraClick({ clientX: 170, clientY: 290 }); handleVideoDoubleClick({ button: 2, clientX: 170, clientY: 290 })");
+  assert.equal(cameraRequests(h, "ai.trackPerson").length, 0);
+});
+
+test("camera: C and A need a current pointer inside the picture and ignore typing, modifiers, repeat and dialogs", async () => {
+  const h = cameraHarness();
+  await connectCamera(h, { ...FULL_CAPS, ai: { trackPerson: true, status: true, stop: true } });
+  await h.start(false);
+  const invoke = (key, extra = {}) => h.run(`handleKeyDown({ key: ${JSON.stringify(key)}, target: { tagName: ${JSON.stringify(extra.tagName || "BODY")} }, repeat: ${Boolean(extra.repeat)}, ctrlKey: ${Boolean(extra.ctrlKey)}, altKey: false, metaKey: false, shiftKey: false, preventDefault() { globalThis.prevented++; } })`);
+  invoke("c");
+  assert.equal(cameraRequests(h, "ptz.centerOn").length, 0, "there is no pointer position yet");
+  h.run("handleVideoPointerMove({ clientX: 490, clientY: 200 })");
+  invoke("c", { tagName: "INPUT" });
+  invoke("c", { ctrlKey: true });
+  invoke("c", { repeat: true });
+  h.run("handleVideoPointerMove({ clientX: 700, clientY: 200 })");
+  invoke("c");
+  assert.equal(cameraRequests(h, "ptz.centerOn").length, 0, "outside the picture is ignored");
+  h.run("handleVideoPointerMove({ clientX: 490, clientY: 200 })");
+  invoke("c");
+  assert.equal(cameraRequests(h, "ptz.centerOn").length, 1);
+  h.run("cameraProc.aiEnabled = false");
+  invoke("a");
+  assert.equal(cameraRequests(h, "ai.trackPerson").length, 1);
+  h.run("scanDialog.hidden = false");
+  invoke("c");
+  assert.equal(cameraRequests(h, "ptz.centerOn").length, 1, "a dialog blocks shortcuts");
+  h.run("clearVideoPointer()");
+  h.run("scanDialog.hidden = true");
+  invoke("a");
+  assert.equal(cameraRequests(h, "ai.trackPerson").length, 1, "a lost pointer position blocks shortcuts");
+});
+
+test("camera: an old double-click timeout does not delay a right-click turn", async () => {
   const h = cameraHarness();
   await connectCamera(h, { ...FULL_CAPS, ai: { trackPerson: true } });
   await h.start(false);
-  const field = h.elements.get("cameraClickDelay");
-  assert.equal(field.value, "300");
-  h.run('parameters.camera_presets = { "1": { pan: 10, tilt: 2 } }');
-  field.value = "150";
-  field.change();
-  await h.run("pendingParamsWrite");
-  const saved = JSON.parse(h.files.get("/app/vlc_rec_params.json"));
-  assert.equal(saved.camera_double_click_ms, 150);
-  assert.deepEqual(saved.camera_presets, { "1": { pan: 10, tilt: 2 } });
-  h.run("handleVideoClick({ clientX: 490, clientY: 200, detail: 1 })");
-  h.fireTimer(150);
-  h.run("handleVideoDoubleClick({ clientX: 490, clientY: 200 })");
+  h.run("parameters.camera_double_click_ms = 1000");
+  const timersBefore = h.timerDelays.length;
+  h.run("handleRightCameraClick({ clientX: 490, clientY: 200, detail: 1 })");
   assert.equal(cameraRequests(h, "ptz.centerOn").length, 1);
   assert.equal(cameraRequests(h, "ai.trackPerson").length, 0);
-  field.value = "50";
-  field.change();
-  assert.equal(field.value, "100");
-  field.value = "5000";
-  field.change();
-  assert.equal(field.value, "1000");
-  field.value = "";
-  field.change();
-  assert.equal(field.value, "300");
-  await h.run("pendingParamsWrite");
-  h.files.set("/app/vlc_rec_params.json", JSON.stringify(saved));
-  await h.run("loadParams()");
-  h.run("showCameraPage()");
-  assert.equal(field.value, "150");
-  assert.equal(h.run("parameters.camera_presets['1'].pan"), 10);
+  assert.equal(h.timerDelays.slice(timersBefore).includes(1000), false, "no click classification timer is created");
 });
 
 test("camera: confirmed AI state draws a visible border and a double click stops tracking", async () => {
@@ -1172,8 +1190,7 @@ test("camera: confirmed AI state draws a visible border and a double click stops
   await cameraAnswers(h, "ai.get", { result: { enabled: true } });
   assert.equal(h.elements.get("videoHost").classList.contains("ai-tracking"), true);
   assert.equal(h.run("videoRectArg()"), "14,24,632,352");
-  h.run("handleVideoClick({ clientX: 330, clientY: 200, detail: 1 })");
-  h.run("handleVideoDoubleClick({ clientX: 330, clientY: 200 })");
+  h.run("handleVideoDoubleClick({ button: 0, clientX: 330, clientY: 200 })");
   assert.equal(cameraRequests(h, "ai.stop").length, 1);
   assert.equal(cameraRequests(h, "ai.trackPerson").length, 0);
   await cameraAnswers(h, "ai.stop", { result: {} });
@@ -1181,8 +1198,7 @@ test("camera: confirmed AI state draws a visible border and a double click stops
   await cameraAnswers(h, "ai.get", { result: { enabled: false } });
   assert.equal(h.elements.get("videoHost").classList.contains("ai-tracking"), false);
   assert.equal(h.run("videoRectArg()"), "10,20,640,360");
-  h.run("handleVideoClick({ clientX: 330, clientY: 200, detail: 1 })");
-  h.run("handleVideoDoubleClick({ clientX: 330, clientY: 200 })");
+  h.run("handleVideoDoubleClick({ button: 0, clientX: 330, clientY: 200 })");
   assert.equal(cameraRequests(h, "ai.trackPerson").length, 1);
 });
 
@@ -1227,8 +1243,7 @@ test("camera: a stale status reply cannot override a newer stop, and lost status
   await cameraAnswers(h, "ai.get", { result: { enabled: true } });
   h.run("refreshCameraAiState()");
   await flush();
-  h.run("handleVideoClick({ clientX: 330, clientY: 200, detail: 1 })");
-  h.run("handleVideoDoubleClick({ clientX: 330, clientY: 200 })");
+  h.run("handleVideoDoubleClick({ button: 0, clientX: 330, clientY: 200 })");
   await cameraAnswers(h, "ai.stop", { result: {} });
   await cameraAnswers(h, "ai.get", { result: { enabled: true } });
   assert.equal(h.elements.get("videoHost").classList.contains("ai-tracking"), false);
@@ -1249,7 +1264,7 @@ test("camera: the controls follow what the adapter declares, and what it says la
   assert.equal(h.elements.get("cameraZoomItem").hidden, false);
   assert.equal(h.elements.get("cameraSpeedItem").hidden, true);
   await h.start(false);
-  h.run("handleVideoClick({ clientX: 490, clientY: 200 })");
+  h.run("handleRightCameraClick({ clientX: 490, clientY: 200 })");
   h.run('handleKeyDown({ key: "ArrowRight", target: { tagName: "BODY" }, preventDefault() {} })');
   assert.deepEqual(cameraRequests(h).map((r) => r.method), ["hello", "connect"], "no centering, no nudging, no speed");
   h.elements.get("zoomInBtn").click();
@@ -1262,9 +1277,9 @@ test("camera: the controls follow what the adapter declares, and what it says la
   assert.equal(turnOnly.elements.get("cameraBar").hidden, true);
   assert.equal(turnOnly.elements.get("layout").dataset.camera, "off");
   await turnOnly.start(false);
-  turnOnly.run("handleVideoClick({ clientX: 490, clientY: 200 })");
+  turnOnly.run("handleRightCameraClick({ clientX: 490, clientY: 200 })");
   assert.equal(cameraRequests(turnOnly, "ptz.centerOn").length, 1);
-  assert.match(turnOnly.elements.get("cameraHint").textContent, /Click the picture.*Arrow keys/);
+  assert.match(turnOnly.elements.get("cameraHint").textContent, /Right-click the picture.*Arrow keys/);
 
   // Nothing at all: no panel either.
   const nothing = cameraHarness();
@@ -1360,7 +1375,7 @@ test("camera: a message from the adapter is shown with the status for a few seco
   // An error as the answer to a request is a note too.
   await h.start(false);
   h.advance(7000);
-  h.run("handleVideoClick({ clientX: 490, clientY: 200 })");
+  h.run("handleRightCameraClick({ clientX: 490, clientY: 200 })");
   await cameraAnswers(h, "ptz.centerOn", { error: { code: "busy", message: "The camera is moving." } });
   assert.match(h.run("withCameraNote('')"), /The camera is moving\./);
 
@@ -1370,7 +1385,7 @@ test("camera: a message from the adapter is shown with the status for a few seco
   assert.equal(h.run("cameraActive()"), false);
   const sent = cameraRequests(h).length;
   h.advance(2000);
-  h.run("handleVideoClick({ clientX: 100, clientY: 100 })");
+  h.run("handleRightCameraClick({ clientX: 100, clientY: 100 })");
   assert.equal(cameraRequests(h).length, sent, "nothing is sent to an adapter that is gone");
   assert.match(h.run("withCameraNote('')"), /adapter stopped/);
 });
@@ -1379,7 +1394,7 @@ test("camera: a request that gets no answer times out and says so", async () => 
   const h = cameraHarness();
   await connectCamera(h);
   await h.start(false);
-  h.run("handleVideoClick({ clientX: 490, clientY: 200 })");
+  h.run("handleRightCameraClick({ clientX: 490, clientY: 200 })");
   await flush();
   h.fireTimer(3000);
   await flush();
@@ -1393,51 +1408,73 @@ test("camera: closing the window stops the adapter", async () => {
   assert.equal(cameraRequests(h, "shutdown").length, 1);
 });
 
-test("camera: the speed slider takes its range from the adapter, shows the configured speed, and tells the adapter when it is let go", async () => {
+test("camera: the speed slider stores a percentage and maps it to the adapter range", async () => {
   const h = cameraHarness();
-  h.run("parameters.camera_turn_speed = 30");
+  h.run("parameters.camera_turn_speed_percent = 30");
   await connectCamera(h);
   const slider = h.elements.get("cameraSpeed");
   const readout = h.elements.get("cameraSpeedValue");
   const speeds = () => cameraRequests(h, "ptz.setSpeed").map((r) => r.params.value);
   assert.equal(slider.value, "30");
   assert.equal(slider.min, "1");
-  assert.equal(slider.max, "90");
-  assert.equal(readout.textContent, "30 °/s");
-  assert.deepEqual(speeds(), [30], "the setting goes to the adapter after connect");
+  assert.equal(slider.max, "100");
+  assert.equal(readout.textContent, "30%");
+  assert.deepEqual(speeds(), [27], "the setting maps into the legacy adapter's advertised range");
 
   // Any whole speed within the range can be set, not only a few.
   slider.value = "7";
   slider.input();
-  assert.equal(readout.textContent, "7 °/s", "the number follows the thumb");
-  assert.deepEqual(speeds(), [30], "but nothing is sent while it is dragged");
+  assert.equal(readout.textContent, "7%", "the number follows the thumb");
+  assert.deepEqual(speeds(), [27], "but nothing is sent while it is dragged");
   slider.change();
-  assert.deepEqual(speeds(), [30, 7]);
-  assert.equal(h.run("parameters.camera_turn_speed"), 7);
+  assert.deepEqual(speeds(), [27, 6]);
+  assert.equal(h.run("parameters.camera_turn_speed_percent"), 7);
   await flush();
-  assert.match(h.files.get("/app/vlc_rec_params.json"), /"camera_turn_speed": 7/, "the choice is saved");
+  assert.match(h.files.get("/app/vlc_rec_params.json"), /"camera_turn_speed_percent": 7/, "the choice is saved");
 
   slider.value = "90";
   slider.change();
   slider.value = "1";
   slider.change();
-  assert.deepEqual(speeds(), [30, 7, 90, 1]);
+  assert.deepEqual(speeds(), [27, 6, 81, 1]);
 
   slider.value = "0"; // out of range: ignored
   slider.change();
   assert.equal(speeds().length, 4);
 
-  // An adapter with another range: the slider follows it, and a saved speed outside it is not used.
+  // An old degree-per-second setting is mapped against the newly advertised range after connect.
   const slow = cameraHarness();
-  slow.run("parameters.camera_turn_speed = 60");
+  slow.run("legacyCameraTurnSpeed = 60");
   await connectCamera(slow, { ...FULL_CAPS, ptz: { ...FULL_CAPS.ptz, speed: { min: 2, max: 45, unit: "deg/s" } } });
   const narrow = slow.elements.get("cameraSpeed");
-  assert.equal(narrow.min, "2");
-  assert.equal(narrow.max, "45");
-  assert.equal(narrow.value, "10", "60 is outside 2 to 45: the default");
-  narrow.value = "50";
+  assert.equal(narrow.min, "1");
+  assert.equal(narrow.max, "100");
+  assert.equal(narrow.value, "67", "60 maps through the legacy 1 to 90 scale into the percentage control");
+  narrow.value = "101";
   narrow.change();
-  assert.equal(cameraRequests(slow, "ptz.setSpeed").length, 1, "50 is outside the range");
+  assert.equal(cameraRequests(slow, "ptz.setSpeed").length, 1, "101% is outside the range");
+});
+
+test("camera: normalized adapter speed uses the same percentage control", async () => {
+  const h = cameraHarness();
+  h.run("parameters.camera_turn_speed_percent = 25");
+  await connectCamera(h, { ...FULL_CAPS, ptz: { ...FULL_CAPS.ptz, speed: { min: 0.01, max: 1, default: 0.25, unit: "normalized" } } });
+  assert.equal(h.elements.get("cameraSpeed").value, "25");
+  assert.deepEqual(cameraRequests(h, "ptz.setSpeed").map((r) => r.params.value), [0.25]);
+  h.elements.get("cameraSpeed").value = "100";
+  h.elements.get("cameraSpeed").change();
+  assert.deepEqual(cameraRequests(h, "ptz.setSpeed").map((r) => r.params.value), [0.25, 1]);
+  assert.equal(h.run("parameters.camera_turn_speed_percent"), 100);
+});
+
+test("camera: normalized speed percentage maps across the advertised range", async () => {
+  const h = cameraHarness();
+  h.run("parameters.camera_turn_speed_percent = 1");
+  await connectCamera(h, { ...FULL_CAPS, ptz: { ...FULL_CAPS.ptz, speed: { min: 0.2, max: 0.8, unit: "normalized" } } });
+  assert.deepEqual(cameraRequests(h, "ptz.setSpeed").map((r) => r.params.value), [0.2]);
+  h.elements.get("cameraSpeed").value = "100";
+  h.elements.get("cameraSpeed").change();
+  assert.deepEqual(cameraRequests(h, "ptz.setSpeed").map((r) => r.params.value), [0.2, 0.8]);
 });
 
 test("camera: the panel is arranged again when the camera controls appear and when the adapter goes", async () => {
@@ -1498,15 +1535,15 @@ test("camera: the next click waits for a slow turn to end and the picture to cat
   await connectCamera(h);
   await h.start(false);
   const turns = () => cameraRequests(h, "ptz.centerOn").length;
-  h.run("handleVideoClick({ clientX: 490, clientY: 200 })");
+  h.run("handleRightCameraClick({ clientX: 490, clientY: 200 })");
   assert.equal(turns(), 1);
-  // 19 degrees at 10 degrees per second: 400 ms to start + 1900 ms + 800 ms for the picture.
+  // The configured 25% speed leaves time for the command and the picture to catch up.
   cameraSays(h, { event: "turned", moved: true, fromPan: 19, fromTilt: 3, toPan: 0, toTilt: 3, zoom: 0.25 });
-  h.advance(2500);
-  h.run("handleVideoClick({ clientX: 100, clientY: 100 })");
+  h.advance(1000);
+  h.run("handleRightCameraClick({ clientX: 100, clientY: 100 })");
   assert.equal(turns(), 1, "still turning");
-  h.advance(700);
-  h.run("handleVideoClick({ clientX: 100, clientY: 100 })");
+  h.advance(1500);
+  h.run("handleRightCameraClick({ clientX: 100, clientY: 100 })");
   assert.equal(turns(), 2, "the turn is over and the picture has caught up");
 });
 
@@ -1715,14 +1752,14 @@ test("camera: the waiting after a click follows the duration the adapter reports
   await connectCamera(h);
   await h.start(false);
   const turns = () => cameraRequests(h, "ptz.centerOn").length;
-  h.run("handleVideoClick({ clientX: 490, clientY: 200 })");
+  h.run("handleRightCameraClick({ clientX: 490, clientY: 200 })");
   // 5 degrees at 10 degrees per second would be 500 ms; the adapter says 3000.
   cameraSays(h, { event: "turned", moved: true, fromPan: 19, fromTilt: 3, toPan: 24, toTilt: 3, zoom: 0.25, durationMs: 3000 });
   h.advance(3500);
-  h.run("handleVideoClick({ clientX: 100, clientY: 100 })");
+  h.run("handleRightCameraClick({ clientX: 100, clientY: 100 })");
   assert.equal(turns(), 1, "400 + 3000 + 800 ms are not over yet");
   h.advance(1000);
-  h.run("handleVideoClick({ clientX: 100, clientY: 100 })");
+  h.run("handleRightCameraClick({ clientX: 100, clientY: 100 })");
   assert.equal(turns(), 2);
 });
 
@@ -1737,7 +1774,8 @@ test("camera: settings of earlier builds become the config of the osc adapter", 
   assert.equal(h.run("JSON.stringify(parameters.camera_config)"),
     JSON.stringify({ host: "192.168.1.50", hfov: 80, zoomRatio: 5, zoomMax: 36, nudgeSpeed: 20 }));
   assert.equal(h.run("parameters.camera_zoom_step"), 11, "4 of 36 units is 11 percent of the range");
-  assert.equal(h.run("parameters.camera_turn_speed"), 25);
+  assert.equal(h.run("legacyCameraTurnSpeed"), 25, "the old speed waits for adapter capabilities so it can be mapped");
+  assert.equal(h.run('"camera_turn_speed" in parameters'), false, "only the canonical percentage is stored");
   assert.equal(h.run("parameters.camera_arrow_step_deg"), 3);
   for (const key of ["camera_ip", "camera_hfov_deg", "camera_zoom_max", "camera_zoom_ratio", "camera_arrow_speed"]) {
     assert.equal(h.run(`"${key}" in parameters`), false, key);
@@ -1755,6 +1793,13 @@ test("camera: settings of earlier builds become the config of the osc adapter", 
   await current.run("loadParams()");
   assert.equal(current.run("parameters.camera_plugin"), "other");
   assert.equal(current.run("parameters.camera_zoom_step"), 4, "no camera_ip: the new format, nothing is converted");
+
+  const speedMigration = cameraHarness();
+  speedMigration.files.set("/app/vlc_rec_params.json", JSON.stringify({ camera_turn_speed: 10 }));
+  await speedMigration.run("loadParams()");
+  await connectCamera(speedMigration, { ...FULL_CAPS, ptz: { ...FULL_CAPS.ptz, speed: { min: 0.01, max: 1, default: 0.25, unit: "normalized" } } });
+  assert.equal(speedMigration.run("parameters.camera_turn_speed_percent"), 11, "10°/s maps through the former 1..90 range");
+  assert.deepEqual(cameraRequests(speedMigration, "ptz.setSpeed").map((r) => r.params.value), [0.11]);
 });
 
 // ---- camera presets ----
@@ -1877,6 +1922,17 @@ test("presets: a number key applies the position and/or the zoom that was taught
   assert.deepEqual(sent().at(-1), ["ptz.moveTo", { pan: 30, tilt: -4 }]);
   h.elements.get("presetDrawer").children[2].click();
   assert.deepEqual(sent().at(-1), ["zoom.set", { value: 0.25 }]);
+});
+
+test("presets: applying a zoom-only preset leaves AI tracking running", async () => {
+  const h = cameraHarness();
+  await connectCamera(h, { ...FULL_CAPS, ai: { trackPerson: true, status: true, stop: true }, zoom: { by: true, absolute: true } });
+  await cameraAnswers(h, "ai.get", { result: { enabled: true } });
+  h.run('parameters.camera_presets = { "1": { zoom: 0.5 } }');
+  await h.run("applyPreset(1)");
+  assert.equal(cameraRequests(h, "ai.stop").length, 0);
+  assert.deepEqual(cameraRequests(h, "zoom.set").map((r) => r.params), [{ value: 0.5 }]);
+  assert.equal(h.elements.get("videoHost").classList.contains("ai-tracking"), true);
 });
 
 test("presets: only the right keys count", async () => {
@@ -2084,6 +2140,45 @@ test("presets: the menu is limited to the visible part of a scrolling drawer", a
   assert.equal(h.elements.get("presetMenu").style.left, "56px");
   assert.equal(h.elements.get("presetMenu").style.top, "4px");
   assert.equal(h.elements.get("presetMenu").style.maxHeight, "92px");
+});
+
+test("presets: compact menus overlay HTML preview but close before native VLC returns", async () => {
+  const h = cameraHarness(); h.enablePlayer();
+  h.run(`globalThis.CameraPreview=class {
+    constructor(options){this.options=options;}
+    async start(){this.options.onFrame();}
+    close(){}
+  }; window.innerWidth=800; window.innerHeight=600;`);
+  await connectCamera(h, { ...PRESET_CAPS, preview:{format:"hevc-annexb-v1"} });
+  await h.start(true);
+  const menu = h.elements.get("presetMenu"), bar = h.elements.get("presetBar");
+  bar.children[0].contextmenu({preventDefault(){}});
+  assert.equal(menu.hidden,true,"native VLC keeps compact context menus unavailable");
+  assert.match(bar.children[0].title,/Open settings/);
+  h.elements.get("previewSource").value="camera";
+  await h.run("handlePreviewSourceChange()");
+  await cameraAnswers(h,"preview.open",{result:{format:"hevc-annexb-v1"}});
+  h.elements.get("drawer").getBoundingClientRect=()=>({left:0,top:500,right:200,bottom:600});
+  h.elements.get("panel").getBoundingClientRect=()=>({left:0,top:500,right:800,bottom:600});
+  menu.getBoundingClientRect=()=>({width:240,height:200});
+  const button=bar.children[0];
+  button.getBoundingClientRect=()=>({left:600,top:550,bottom:576,right:632,width:32,height:26});
+  const hides=h.stdin.filter(line=>line==="HIDE\n").length;
+  assert.match(button.title,/Right click: menu/);
+  button.contextmenu({preventDefault(){}});
+  assert.equal(menu.hidden,false);
+  assert.equal(menu.style.left,"556px");
+  assert.equal(menu.style.top,"346px","the menu can extend over the HTML video above the panel");
+  assert.equal(menu.style.maxWidth,"792px");
+  assert.equal(menu.style.maxHeight,"592px");
+  assert.equal(h.stdin.filter(line=>line==="HIDE\n").length,hides,"opening a menu does not hide HTML preview");
+  assert.equal(menu.children[3].disabled,false,"position teaching is available");
+  h.elements.get("previewSource").value="srt";
+  await h.run("handlePreviewSourceChange()");
+  assert.equal(menu.hidden,true,"the HTML overlay closes before VLC is shown");
+  assert.match(bar.children[0].title,/Open settings/);
+  bar.children[0].contextmenu({preventDefault(){}});
+  assert.equal(menu.hidden,true);
 });
 
 test("presets: only sensible presets are read from the settings", async () => {
@@ -2443,4 +2538,451 @@ test("closing the app waits for scan child cleanup before exiting", async () => 
   assert.deepEqual(order, ["taskkill /PID 1002 /T /F", "exit"]);
   assert.ok(h.actions.includes("app-exit"));
   assert.equal(h.run("scanState.running"), false);
+});
+
+test("camera: preview source switches during recording without restarting the SRT player", async () => {
+  const h = cameraHarness();
+  h.enablePlayer();
+  h.run(`globalThis.previewClients = []; globalThis.CameraPreview = class {
+    constructor(options) { this.options = options; previewClients.push(this); }
+    async start(session) { this.session = session; this.options.onDimensions({width:1280,height:720}); this.options.onFrame(); }
+    close() { this.closed = true; }
+  }`);
+  await connectCamera(h, { ...FULL_CAPS, preview: { format: "hevc-annexb-v1" } });
+  await h.start(true);
+  const playerId = h.run("currentProcess.id"), output = h.run("outputFile"), launches = h.launches.length;
+  h.elements.get("previewSource").value = "camera";
+  h.elements.get("previewSource").change();
+  await cameraAnswers(h, "preview.open", { result: { url: "ws://127.0.0.1:30000/session", format: "hevc-annexb-v1" } });
+  assert.equal(h.elements.get("cameraPreviewCanvas").hidden, false);
+  assert.ok(h.stdin.includes("HIDE\n"));
+  h.run('sendPlayerCommand("SHOW")');
+  assert.equal(h.stdin.at(-1), "HIDE\n", "dialogs cannot show SRT over the camera canvas");
+  h.elements.get("previewSource").value = "srt";
+  h.elements.get("previewSource").change();
+  assert.equal(h.run("previewClients[0].closed"), true);
+  assert.equal(cameraRequests(h, "preview.close").length, 1);
+  assert.ok(h.stdin.includes("SHOW\n"));
+  assert.equal(h.run("currentProcess.id"), playerId);
+  assert.equal(h.run("mode"), "recording");
+  assert.equal(h.run("outputFile"), output);
+  assert.equal(h.launches.length, launches);
+});
+
+test("camera: switching sources starts an idle preview and restarts a running preview automatically", async () => {
+  const h = cameraHarness();
+  h.enablePlayer();
+  h.run(`globalThis.previewClients = []; globalThis.CameraPreview = class {
+    constructor(options) { this.options=options; previewClients.push(this); }
+    async start() { this.options.onFrame(); }
+    close() { this.closed=true; }
+  }; ip.value='192.168.1.2:5000'; filename.value='preview'; extension.value='mkv';`);
+  await connectCamera(h, { ...FULL_CAPS, preview: { format: "hevc-annexb-v1" } });
+  assert.equal(h.run("mode"), "idle");
+  h.elements.get("previewSource").value = "camera";
+  await h.run("handlePreviewSourceChange()");
+  await cameraAnswers(h, "preview.open", { result: { format: "hevc-annexb-v1" } });
+  assert.equal(h.run("mode"), "preview");
+  assert.equal(h.elements.get("cameraPreviewCanvas").hidden, false);
+  const oldPlayer = h.run("currentProcess.id"), count = h.launches.length;
+  h.elements.get("ip").value = "192.168.1.99:5000";
+  h.elements.get("previewSource").value = "srt";
+  await h.run("handlePreviewSourceChange()");
+  assert.equal(h.run("mode"), "preview");
+  assert.notEqual(h.run("currentProcess.id"), oldPlayer);
+  assert.equal(h.live.has(oldPlayer), false, "the previous player has exited before its replacement opens");
+  assert.equal(h.launches.length, count + 1);
+  assert.equal(h.run("activeSession.request.ipAddress"), "192.168.1.2:5000", "source switching retains the active stream");
+  assert.equal(h.run("previewClients[0].closed"), true);
+  assert.equal(h.elements.get("cameraPreviewCanvas").hidden, true);
+  h.elements.get("previewSource").value = "camera";
+  await h.run("handlePreviewSourceChange()");
+  await cameraAnswers(h, "preview.open", { result: { format: "hevc-annexb-v1" } });
+  assert.equal(h.run("previewClients.length"), 2, "returning to Camera opens a new preview session");
+  assert.equal(h.elements.get("cameraPreviewCanvas").hidden, false);
+});
+
+test("camera: a preview source change waits for the old player before launching its replacement", async () => {
+  const h = cameraHarness(); h.enablePlayer();
+  await connectCamera(h, { ...FULL_CAPS, preview: { format: "hevc-annexb-v1" } });
+  await h.start(false);
+  const old = h.run("currentProcess.id"), count = h.launches.length;
+  const update = h.os.updateSpawnedProcess;
+  h.os.updateSpawnedProcess = async (id, action, data) => {
+    if (id === old && action === "stdIn" && data === "STOP\n") {
+      assert.equal(h.launches.length, count, "no replacement starts while the old connection is alive");
+      h.live.delete(old);
+    }
+    return update(id, action, data);
+  };
+  h.elements.get("previewSource").value = "srt";
+  await h.run("handlePreviewSourceChange()");
+  assert.equal(h.launches.length, count + 1);
+  assert.equal(h.live.has(old), false);
+  assert.equal(h.run("uiBusy"), false);
+});
+
+test("camera: a failed preview stop does not open a second stream or lose the old process", async () => {
+  const h = cameraHarness(); h.enablePlayer();
+  await connectCamera(h, { ...FULL_CAPS, preview: { format: "hevc-annexb-v1" } });
+  await h.start(false);
+  const old = h.run("currentProcess.id"), count = h.launches.length;
+  const update = h.os.updateSpawnedProcess;
+  h.os.updateSpawnedProcess = async (id, action, data) => {
+    if (id === old) {
+      if (action === "exit") throw new Error("The old player could not be stopped.");
+      return;
+    }
+    return update(id, action, data);
+  };
+  h.elements.get("previewSource").value = "srt";
+  await assert.rejects(h.run("handlePreviewSourceChange()"), /old player could not be stopped/);
+  assert.equal(h.launches.length, count);
+  assert.equal(h.run("currentProcess.id"), old);
+  assert.equal(h.live.has(old), true);
+  assert.equal(h.run("mode"), "preview");
+  assert.equal(h.run("uiBusy"), false);
+});
+
+test("camera: browser preview failure restores SRT and preserves the saved preference", async () => {
+  const h = cameraHarness();
+  h.enablePlayer();
+  h.run(`globalThis.CameraPreview = class { constructor(options) { globalThis.previewOptions=options; } async start() {} close() {} }; parameters.preview_source="camera";`);
+  await connectCamera(h, { ...FULL_CAPS, preview: { format: "hevc-annexb-v1" } });
+  await h.start(false);
+  await cameraAnswers(h, "preview.open", { result: { format: "hevc-annexb-v1" } });
+  const launches = h.launches.length;
+  h.run('previewOptions.onError("decoder unavailable")');
+  assert.equal(h.run("browserPreview"), null);
+  assert.equal(h.run("parameters.preview_source"), "camera");
+  assert.equal(h.elements.get("previewSource").value, "srt");
+  assert.match(h.elements.get("previewSourceStatus").textContent, /displaying SRT.*decoder unavailable/);
+  assert.equal(h.stdin.at(-1).startsWith("SHOW"), true);
+  h.run("updateButtons()");
+  assert.equal(cameraRequests(h, "preview.open").length, 1, "fallback does not repeatedly reopen the failed source");
+  assert.equal(h.launches.length, launches);
+});
+
+test("camera: telemetry is capability-gated, unknown when stale, and formatting needs confirmation", async () => {
+  const h = cameraHarness();
+  const caps = { ...FULL_CAPS, telemetry: { battery:true,storage:true,pollMs:1000 }, storage:{format:true} };
+  await connectCamera(h,caps);
+  const fresh = {fresh:true,battery:{present:true,level:.88,charging:false},storage:{status:"ready",totalBytes:102400,freeBytes:40960,remainingSeconds:600},recording:false};
+  await cameraAnswers(h,"telemetry.get",{result:{fresh:false,battery:null,storage:null,recording:null}});
+  assert.equal(h.elements.get("cameraFormatBtn").disabled,true);
+  assert.match(h.elements.get("cameraBattery").textContent,/unavailable/);
+  h.fireTimer(1000);
+  await cameraAnswers(h,"telemetry.get",{result:fresh});
+  assert.match(h.elements.get("cameraBattery").textContent,/88%/);
+  assert.match(h.elements.get("cameraStorage").textContent,/40.00 KiB free.*60.00 KiB used/);
+  assert.match(h.elements.get("cameraStorage").textContent,/10 min remaining/);
+  assert.equal(h.elements.get("cameraRecording").textContent,"Camera recording: off");
+  h.os.showMessageBox=async()=>"NO";
+  await h.run("formatCameraStorage()");
+  assert.equal(cameraRequests(h,"storage.format").length,0);
+  h.os.showMessageBox=async()=>"YES";
+  h.run("globalThis.formatResult=formatCameraStorage()");await flush();
+  assert.deepEqual(cameraRequests(h,"storage.format").at(-1).params,{confirmed:true});
+  await cameraAnswers(h,"storage.format",{result:{accepted:true}});await h.run("formatResult");
+  assert.equal(h.run("cameraFormatting"),true);
+  h.fireTimer(1000);await cameraAnswers(h,"telemetry.get",{result:{...fresh,storage:{...fresh.storage,freeBytes:100000}}});
+  assert.equal(h.run("cameraFormatting"),true,"a free-space change alone is not proof that formatting completed");
+  h.fireTimer(1000);await cameraAnswers(h,"telemetry.get",{result:{...fresh,storage:{...fresh.storage,formatting:false}}});
+  assert.equal(h.run("cameraFormatting"),true,"formatting:false without an observed busy phase is not proof of completion");
+  h.fireTimer(1000);await cameraAnswers(h,"telemetry.get",{result:{...fresh,fresh:false,storage:{...fresh.storage,status:"preparing",formatting:true}}});
+  h.fireTimer(1000);await cameraAnswers(h,"telemetry.get",{result:{...fresh,storage:{...fresh.storage,status:"ready"}}});
+  assert.equal(h.run("cameraFormatting"),true,"stale busy telemetry cannot establish the busy phase or complete formatting");
+  h.fireTimer(1000);await cameraAnswers(h,"telemetry.get",{result:{...fresh,storage:{...fresh.storage,status:"preparing"}}});
+  h.fireTimer(1000);await cameraAnswers(h,"telemetry.get",{result:{...fresh,storage:{...fresh.storage,status:"ready",freeBytes:100000}}});
+  assert.equal(h.run("cameraFormatting"),false);
+  assert.match(h.elements.get("cameraStorageStatus").textContent,/completed/);
+  assert.match(h.run("cameraNote"),/SD formatting completed/,"result is also surfaced in the visible camera status");
+  h.fireTimer(1000);await cameraAnswers(h,"telemetry.get",{result:{...fresh,recording:true}});
+  assert.equal(h.elements.get("cameraFormatBtn").disabled,true);
+});
+
+test("camera: telemetry renderer safely hides controls when capabilities disappear", () => {
+  const h = harness();
+  h.run("cameraTelemetryValue={fresh:true,recording:false,power:{on:true}}; showCameraTelemetry()");
+  assert.equal(h.elements.get("cameraTelemetry").hidden,true);
+  assert.equal(h.elements.get("cameraPowerBtn").hidden,true);
+  assert.equal(h.elements.get("cameraRecordBtn").hidden,true);
+});
+
+test("camera: device recording and power controls are capability and telemetry gated", async () => {
+  const h = cameraHarness();
+  const caps = { ...FULL_CAPS, record: {start:true,stop:true}, power:{on:true,off:true,mode:"remote"},
+    telemetry:{recording:true,power:true,pollMs:1000} };
+  await connectCamera(h,caps);
+  assert.equal(h.elements.get("cameraRecordBtn").hidden,false);
+  assert.equal(h.elements.get("cameraRecordBtn").disabled,true,"unknown state must not start recording");
+  assert.equal(h.elements.get("cameraPowerBtn").disabled,false,"explicit power-on remains available for recovery");
+  assert.equal(h.elements.get("cameraPowerBtn").textContent,"Power camera on","unknown power state offers the recovery action");
+  await h.run("cameraPowerAction(false)");
+  assert.equal(cameraRequests(h,"power.set").length,0);
+  await cameraAnswers(h,"telemetry.get",{result:{fresh:true,recording:false,power:{on:true}}});
+  assert.equal(h.elements.get("cameraRecordBtn").disabled,false);
+  assert.equal(h.elements.get("cameraRecordBtn").textContent,"Start camera recording");
+  assert.equal(h.elements.get("cameraPowerBtn").disabled,false);
+  h.run("globalThis.recordStartResult=cameraRecordAction(true)"); await flush();
+  assert.equal(cameraRequests(h,"record.start").length,1);
+  await cameraAnswers(h,"record.start",{result:{accepted:true}}); await h.run("recordStartResult");
+  assert.match(h.elements.get("cameraStorageStatus").textContent,/waiting for camera status/);
+  h.run("cameraTelemetryValue={fresh:true,recording:true,power:{on:true}}; observeCameraAction(cameraProc,cameraTelemetryValue); showCameraTelemetry()");
+  assert.match(h.elements.get("cameraStorageStatus").textContent,/recording started/);
+  assert.equal(h.elements.get("cameraRecordBtn").disabled,false);
+  assert.equal(h.elements.get("cameraRecordBtn").textContent,"Stop camera recording");
+  h.os.showMessageBox=async()=>"NO";
+  await h.run("cameraPowerAction(false)");
+  assert.equal(cameraRequests(h,"power.set").length,0,"power-off is refused while camera recording is active");
+  assert.match(h.elements.get("cameraStorageStatus").textContent,/Stop camera recording/);
+  h.run("mode='recording'; cameraTelemetryValue={fresh:true,recording:false,power:{on:true}}; showCameraTelemetry()");
+  h.os.showMessageBox=async()=>"NO";
+  await h.run("cameraPowerAction(false)");
+  assert.equal(cameraRequests(h,"power.set").length,0,"local SRT recording requires confirmation");
+  h.os.showMessageBox=async()=>"YES";
+  h.run("globalThis.powerOffResult=cameraPowerAction(false)"); await flush();
+  assert.deepEqual(cameraRequests(h,"power.set").at(-1).params,{on:false});
+  await cameraAnswers(h,"power.set",{result:{accepted:true}}); await h.run("powerOffResult");
+  assert.equal(h.elements.get("cameraPowerBtn").disabled,true,"accepted is not mistaken for observed power-off state");
+  assert.match(h.elements.get("cameraStorageStatus").textContent,/waiting for camera status/);
+  h.run("cameraTelemetryValue={fresh:true,recording:false,power:{on:false}}; observeCameraAction(cameraProc,cameraTelemetryValue); showCameraTelemetry()");
+  assert.match(h.elements.get("cameraStorageStatus").textContent,/powered off/);
+  assert.equal(h.elements.get("cameraPowerBtn").textContent,"Power camera on");
+  h.run("cameraTelemetryValue={fresh:false,recording:null,power:{on:true}}; showCameraTelemetry()");
+  assert.equal(h.elements.get("cameraRecordBtn").disabled,true);
+  assert.equal(h.elements.get("cameraPowerBtn").disabled,false);
+  h.run("globalThis.stalePowerOn=cameraPowerAction(true)"); await flush();
+  assert.deepEqual(cameraRequests(h,"power.set").at(-1).params,{on:true},"stale on-status cannot suppress an available power-on action");
+  await cameraAnswers(h,"power.set",{result:{accepted:true}}); await h.run("stalePowerOn");
+  assert.match(h.elements.get("cameraStorageStatus").textContent,/waiting for camera status/);
+});
+
+test("camera: single record and power buttons change actions after confirmed state changes", async () => {
+  const h = cameraHarness();
+  await connectCamera(h, { ...FULL_CAPS, record:{start:true,stop:true}, power:{on:true,off:true},
+    telemetry:{recording:true,power:true} });
+  const value = {fresh:true,recording:false,power:{on:true}};
+  await cameraAnswers(h,"telemetry.get",{result:value});
+  const record = h.elements.get("cameraRecordBtn"), power = h.elements.get("cameraPowerBtn");
+  const observed = state => h.run(`cameraTelemetryValue=${JSON.stringify(state)}; observeCameraAction(cameraProc,cameraTelemetryValue); showCameraTelemetry()`);
+  assert.equal(record.textContent,"Start camera recording");
+  assert.equal(record.attributes["aria-pressed"],"false");
+  let click = record.click(); await flush();
+  assert.equal(cameraRequests(h,"record.start").length,1);
+  assert.equal(record.textContent,"Starting camera recording…");
+  assert.equal(record.disabled,true);
+  await cameraAnswers(h,"record.start",{result:{accepted:true}}); await click;
+  assert.equal(record.textContent,"Starting camera recording…","acceptance alone does not switch to the stop action");
+  observed({...value,recording:true});
+  assert.equal(record.textContent,"Stop camera recording");
+  assert.equal(record.attributes["aria-pressed"],"true");
+  assert.equal(record.disabled,false);
+  click = record.click(); await flush();
+  assert.equal(cameraRequests(h,"record.stop").length,1);
+  await cameraAnswers(h,"record.stop",{result:{accepted:true}}); await click;
+  observed(value);
+  assert.equal(record.textContent,"Start camera recording");
+  assert.equal(power.textContent,"Power camera off");
+  click = power.click(); await flush();
+  assert.deepEqual(cameraRequests(h,"power.set").at(-1).params,{on:false});
+  assert.equal(power.textContent,"Powering camera off…");
+  await cameraAnswers(h,"power.set",{result:{accepted:true}}); await click;
+  observed({...value,power:{on:false}});
+  assert.equal(power.textContent,"Power camera on");
+  assert.equal(power.attributes["aria-pressed"],"false");
+  assert.equal(power.disabled,false);
+  click = power.click(); await flush();
+  assert.deepEqual(cameraRequests(h,"power.set").at(-1).params,{on:true});
+  await cameraAnswers(h,"power.set",{result:{accepted:true}}); await click;
+  observed(value);
+  assert.equal(power.textContent,"Power camera off");
+  assert.equal(power.attributes["aria-pressed"],"true");
+});
+
+test("camera: telemetry already in flight cannot confirm a later power action", async () => {
+  const h = cameraHarness();
+  const caps = { ...FULL_CAPS, power:{on:true,off:true}, telemetry:{power:true,pollMs:1000} };
+  await connectCamera(h, caps);
+  // The connection's first telemetry request remains in flight when power-on is requested.
+  h.run("cameraTelemetryValue={fresh:false,power:null}; globalThis.powerOnPromise=cameraPowerAction(true)");
+  await flush();
+  assert.equal(cameraRequests(h, "power.set").length, 1);
+  await cameraAnswers(h, "power.set", { result:{accepted:true} });
+  await h.run("powerOnPromise");
+
+  await cameraAnswers(h, "telemetry.get", { result:{fresh:true,power:{on:true}} });
+  assert.ok(h.run("cameraActionPending"), "a pre-command response cannot confirm power-on");
+  assert.match(h.elements.get("cameraStorageStatus").textContent, /waiting for camera status/);
+
+  h.fireTimer(1000);
+  await cameraAnswers(h, "telemetry.get", { result:{fresh:true,power:{on:true}} });
+  assert.equal(h.run("cameraActionPending"), null, "a telemetry request started after the command confirms it");
+  assert.match(h.elements.get("cameraStorageStatus").textContent, /powered on/);
+});
+
+test("camera: format completion observed before its acknowledgement is reported only after acceptance", async () => {
+  const h = cameraHarness();
+  const caps = { ...FULL_CAPS, telemetry:{storage:true,pollMs:1000}, storage:{format:true} };
+  await connectCamera(h,caps);
+  const fresh = {fresh:true,recording:false,storage:{status:"ready",totalBytes:4096,freeBytes:2048,formatting:null,formatCompleted:false}};
+  await cameraAnswers(h,"telemetry.get",{result:fresh});
+  h.os.showMessageBox=async()=>"YES";
+  h.run("globalThis.formatAck=formatCameraStorage()"); await flush();
+  assert.equal(cameraRequests(h,"storage.format").length,1);
+  h.fireTimer(1000); await cameraAnswers(h,"telemetry.get",{result:{...fresh,storage:{...fresh.storage,status:"preparing",formatting:true}}});
+  h.fireTimer(1000); await cameraAnswers(h,"telemetry.get",{result:{...fresh,storage:{...fresh.storage,status:"ready",formatting:false,formatCompleted:true}}});
+  assert.equal(h.run("cameraFormatting"),true,"a telemetry completion arriving before ACK is held, not reported early");
+  await cameraAnswers(h,"storage.format",{result:{accepted:true}}); await h.run("formatAck");
+  assert.equal(h.run("cameraFormatting"),false);
+  assert.match(h.elements.get("cameraStorageStatus").textContent,/completed/);
+  assert.match(h.run("cameraNote"),/completed/);
+});
+
+test("camera: a telemetry read started before a new format cannot reuse the previous completion", async () => {
+  const h = cameraHarness();
+  const caps = { ...FULL_CAPS, telemetry:{storage:true,pollMs:1000}, storage:{format:true} };
+  await connectCamera(h,caps);
+  const fresh = {fresh:true,recording:false,storage:{status:"ready",totalBytes:4096,freeBytes:2048,formatting:false,formatCompleted:false}};
+  // connectCamera has already issued a telemetry read. Make the UI's last known value suitable for formatting,
+  // then leave that pre-operation read unanswered until after the new operation starts.
+  h.run(`cameraTelemetryValue=${JSON.stringify(fresh)}`);
+  h.os.showMessageBox=async()=>"YES";
+  h.run("globalThis.formatAck=formatCameraStorage()"); await flush();
+  await cameraAnswers(h,"telemetry.get",{result:{...fresh,storage:{...fresh.storage,formatCompleted:true}}});
+  assert.equal(h.run("cameraFormatting"),true,"a pre-request telemetry result cannot complete this format");
+  await cameraAnswers(h,"storage.format",{result:{accepted:true}}); await h.run("formatAck");
+  assert.equal(h.run("cameraFormatting"),true,"the prior operation's sticky completion is ignored after ACK");
+  h.fireTimer(1000);
+  await cameraAnswers(h,"telemetry.get",{result:{...fresh,storage:{...fresh.storage,status:"preparing",formatting:true,formatCompleted:false}}});
+  h.fireTimer(1000);
+  await cameraAnswers(h,"telemetry.get",{result:{...fresh,storage:{...fresh.storage,status:"ready",formatting:false,formatCompleted:true}}});
+  assert.equal(h.run("cameraFormatting"),false);
+  assert.match(h.elements.get("cameraStorageStatus").textContent,/completed/);
+});
+
+test("camera: a late format acknowledgement cannot overwrite connection-loss feedback", async () => {
+  const h = cameraHarness();
+  await connectCamera(h, { ...FULL_CAPS, telemetry:{storage:true}, storage:{format:true} });
+  await cameraAnswers(h,"telemetry.get",{result:{fresh:true,recording:false,storage:{status:"ready",totalBytes:4096,freeBytes:2048}}});
+  h.os.showMessageBox=async()=>"YES";
+  const pending = h.run("formatCameraStorage()"); await flush();
+  cameraSays(h, {event:"state",state:"lost",reason:"connection lost"});
+  const message = h.elements.get("cameraStorageStatus").textContent;
+  assert.match(message,/completion could not be confirmed/);
+  await cameraAnswers(h,"storage.format",{result:{accepted:true}}); await pending;
+  assert.equal(h.elements.get("cameraStorageStatus").textContent,message);
+  assert.equal(h.run("cameraFormatting"),false);
+});
+
+test("camera: two overlapping format confirmations send only one erase request", async () => {
+  const h = cameraHarness();
+  await connectCamera(h, { ...FULL_CAPS, telemetry:{storage:true}, storage:{format:true} });
+  await cameraAnswers(h,"telemetry.get",{result:{fresh:true,recording:false,storage:{status:"ready",totalBytes:4096,freeBytes:2048}}});
+  const choices=[];
+  h.os.showMessageBox=()=>new Promise(resolve=>choices.push(resolve));
+  const first=h.run("formatCameraStorage()"), second=h.run("formatCameraStorage()");
+  assert.equal(choices.length,2);
+  choices[0]("YES"); await flush();
+  choices[1]("YES"); await second;
+  assert.equal(cameraRequests(h,"storage.format").length,1);
+  await cameraAnswers(h,"storage.format",{result:{accepted:true}}); await first;
+  assert.equal(h.run("cameraFormatting"),true);
+});
+
+test("camera: format blocks record start and power off until its result", async () => {
+  const h = cameraHarness();
+  const caps = { ...FULL_CAPS, record:{start:true,stop:true}, power:{on:true,off:true,mode:"remote"},
+    telemetry:{storage:true,recording:true,power:true,pollMs:1000}, storage:{format:true} };
+  await connectCamera(h,caps);
+  await cameraAnswers(h,"telemetry.get",{result:{fresh:true,recording:false,power:{on:true},storage:{status:"ready",freeBytes:2048,totalBytes:4096}}});
+  h.os.showMessageBox=async()=>"YES";
+  h.run("globalThis.formatAck=formatCameraStorage()"); await flush();
+  await cameraAnswers(h,"storage.format",{result:{accepted:true}}); await h.run("formatAck");
+  assert.equal(h.elements.get("cameraRecordBtn").disabled,true);
+  assert.equal(h.elements.get("cameraPowerBtn").disabled,true);
+  await h.run("cameraRecordAction(true)");
+  await h.run("cameraPowerAction(false)");
+  assert.equal(cameraRequests(h,"record.start").length,0);
+  assert.equal(cameraRequests(h,"power.set").length,0);
+});
+
+test("camera: format timeout is reported even when telemetry polling fails", async () => {
+  const h = cameraHarness();
+  const caps = { ...FULL_CAPS, telemetry:{storage:true,pollMs:1000}, storage:{format:true} };
+  await connectCamera(h,caps);
+  const fresh = {fresh:true,recording:false,storage:{status:"ready",totalBytes:4096,freeBytes:2048}};
+  await cameraAnswers(h,"telemetry.get",{result:fresh});
+  h.os.showMessageBox=async()=>"YES";
+  h.run("globalThis.formatAck=formatCameraStorage()"); await flush();
+  await cameraAnswers(h,"storage.format",{result:{accepted:true}}); await h.run("formatAck");
+  h.advance(120001);
+  h.fireTimer(1000);
+  await cameraAnswers(h,"telemetry.get",{error:{code:"offline",message:"telemetry unavailable"}});
+  assert.equal(h.run("cameraFormatting"),false);
+  assert.match(h.elements.get("cameraStorageStatus").textContent,/could not be confirmed/);
+  assert.match(h.run("cameraNote"),/could not be confirmed/);
+});
+
+test("camera: action confirmation waits for telemetry, times out, and ignores a reset action's old timer", async () => {
+  const h = cameraHarness();
+  const caps = { ...FULL_CAPS, record:{start:true,stop:true}, telemetry:{recording:true,pollMs:1000} };
+  await connectCamera(h,caps);
+  await cameraAnswers(h,"telemetry.get",{result:{fresh:true,recording:false}});
+  h.run("globalThis.startResult=cameraRecordAction(true)"); await flush();
+  await cameraAnswers(h,"record.start",{result:{accepted:true}}); await h.run("startResult");
+  assert.ok(h.run("cameraActionPending"));
+  h.advance(30000); h.fireTimer(30000);
+  assert.equal(h.run("cameraActionPending"),null);
+  assert.match(h.elements.get("cameraStorageStatus").textContent,/was not confirmed/);
+
+  h.run("cameraTelemetryValue={fresh:true,recording:false}; showCameraTelemetry(); globalThis.firstActionPromise=cameraRecordAction(true)"); await flush();
+  await cameraAnswers(h,"record.start",{result:{accepted:true}}); await h.run("firstActionPromise");
+  h.run("globalThis.oldAction=cameraActionPending");
+  cameraSays(h,{event:"state",state:"lost",reason:"test loss"});
+  assert.equal(h.run("cameraActionPending"),null,"losing the camera resets the outstanding action");
+  cameraSays(h,{event:"capabilities",capabilities:caps});
+  h.run("cameraTelemetryValue={fresh:true,recording:false}; globalThis.secondActionPromise=cameraRecordAction(true)"); await flush();
+  await cameraAnswers(h,"record.start",{result:{accepted:true}}); await h.run("secondActionPromise");
+  h.run("oldAction.onTimeout()");
+  assert.equal(h.run("cameraActionPending?.desired"),true,"an old timer cannot clear the replacement action");
+  assert.equal(h.elements.get("cameraRecordBtn").disabled,true);
+});
+
+test("camera: losing focus during a right-button press prevents a later release from turning",async()=>{
+  const h=cameraHarness();await connectCamera(h,{...FULL_CAPS,ai:{trackPerson:true}});await h.start(false);
+  h.run("handleVideoMouseDown({button:2})");
+  h.windowEvents.get("blur")();
+  h.run("handleVideoMouseUp({button:2,clientX:490,clientY:200})");
+  assert.equal(cameraRequests(h,"ptz.centerOn").length,0);
+});
+
+test("camera: two-axis adapters combine held arrows while single-axis adapters keep their ordering",async()=>{
+  const h=cameraHarness();
+  await connectCamera(h,{...FULL_CAPS,ptz:{...FULL_CAPS.ptz,continuous:{axes:"both",defaultSpeed:.2}}});
+  h.run('scanDialog.hidden=true; handleArrowKey({key:"ArrowRight",preventDefault(){}}); handleArrowKey({key:"ArrowUp",preventDefault(){}})');
+  assert.deepEqual(cameraRequests(h,"ptz.move").at(-1).params,{pan:.2,tilt:.2,ttl_ms:1000});
+  h.run('handleArrowKey({key:"ArrowLeft",preventDefault(){}})');
+  assert.deepEqual(cameraRequests(h,"ptz.move").at(-1).params,{pan:-.2,tilt:.2,ttl_ms:1000});
+  h.run('handleKeyUp({key:"ArrowLeft",preventDefault(){}})');
+  assert.deepEqual(cameraRequests(h,"ptz.move").at(-1).params,{pan:.2,tilt:.2,ttl_ms:1000});
+  h.windowEvents.get("blur")();
+  assert.equal(cameraRequests(h,"ptz.stop").length,1);
+});
+
+test("camera: holding the right button does not turn before release or count as two clicks",async()=>{
+  const h=cameraHarness();await connectCamera(h,{...FULL_CAPS,ai:{trackPerson:true}});await h.start(false);
+  h.run('handleVideoMouseDown({button:2}); handleVideoContextMenu({button:2,clientX:490,clientY:200,preventDefault(){}})');
+  h.advance(600);assert.equal(cameraRequests(h,"ptz.centerOn","ai.trackPerson").length,0);
+  h.run('handleVideoMouseUp({button:2,clientX:490,clientY:200})');
+  assert.equal(cameraRequests(h,"ptz.centerOn").length,1);
+  assert.equal(cameraRequests(h,"ai.trackPerson").length,0);
+});
+
+test("camera: C resolves the current pointer against a resized or repositioned picture",async()=>{
+  const h=cameraHarness();await connectCamera(h);await h.start(false);
+  h.run('handleVideoPointerMove({clientX:490,clientY:200})');
+  h.elements.get("videoHost").getBoundingClientRect=()=>({left:90,top:20,width:640,height:360});
+  h.run('handleKeyDown({key:"c",preventDefault(){}})');
+  assert.deepEqual(cameraRequests(h,"ptz.centerOn").at(-1).params,{x:.625,y:.5,aspect:1.7778});
 });

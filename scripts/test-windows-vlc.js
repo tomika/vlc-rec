@@ -5,6 +5,7 @@ const path = require("node:path");
 const { pathToFileURL } = require("node:url");
 const { spawnSync } = require("node:child_process");
 const { assertWindowsRuntime } = require("./bundle-windows-vlc");
+const { findMsvc, compileMsvc } = require("./windows-compiler");
 const root = path.resolve(__dirname, "..");
 const embedOnly = process.argv.includes("--embed-only");
 function run(program, args, options = {}) {
@@ -22,14 +23,22 @@ const directory = fs.mkdtempSync(path.join(output, "runtime test "));
 try {
   fs.mkdirSync(path.join(directory, "player"));
   if (!embedOnly) fs.cpSync(path.join(root, "vlc"), path.join(directory, "vlc"), { recursive: true });
-  run(tool, ["build", "-q", "-t", "localhost/vlc-rec-player-builder:1", "-f", "native/Containerfile", "native"], { stdio: "inherit" });
-  run(tool, ["run", "--rm", "--network", "none", "-v", `${root}:/repo:ro`, "-v", `${directory}:/out`, "localhost/vlc-rec-player-builder:1",
-    "x86_64-w64-mingw32-gcc", "-std=gnu11", "-O2", "-static", "-o", "/out/player/probe.exe", "/repo/tests/fixtures/windows-vlc-probe.c", "-ladvapi32", "-lgdi32"], { stdio: "inherit" });
+  const msvc = findMsvc();
+  if (msvc) {
+    for (const [source, executable] of [["windows-vlc-probe.c", "probe.exe"], ["windows-embed-probe.c", "embed-probe.exe"]]) {
+      compileMsvc(msvc, { sources: [path.join(root, "tests/fixtures", source)],
+        output: path.join(directory, "player", executable), libraries: ["advapi32.lib", "gdi32.lib", "user32.lib"] });
+    }
+  } else {
+    run(tool, ["build", "-q", "-t", "localhost/vlc-rec-player-builder:1", "-f", "native/Containerfile", "native"], { stdio: "inherit" });
+    run(tool, ["run", "--rm", "--network", "none", "-v", `${root}:/repo:ro`, "-v", `${directory}:/out`, "localhost/vlc-rec-player-builder:1",
+      "x86_64-w64-mingw32-gcc", "-std=gnu11", "-O2", "-static", "-o", "/out/player/probe.exe", "/repo/tests/fixtures/windows-vlc-probe.c", "-ladvapi32", "-lgdi32"], { stdio: "inherit" });
+    run(tool, ["run", "--rm", "--network", "none", "-v", `${root}:/repo:ro`, "-v", `${directory}:/out`, "localhost/vlc-rec-player-builder:1",
+      "x86_64-w64-mingw32-gcc", "-std=gnu11", "-O2", "-static", "-o", "/out/player/embed-probe.exe", "/repo/tests/fixtures/windows-embed-probe.c", "-ladvapi32", "-lgdi32"], { stdio: "inherit" });
+  }
   run(tool, ["build", "-q", "-t", "localhost/vlc-rec-e2e:1", "-f", "tests/e2e/linux/Containerfile", "tests/e2e/linux"], { stdio: "inherit" });
   run(tool, ["run", "--rm", "--network", "none", "-v", `${directory}:/out`, "localhost/vlc-rec-e2e:1", "ffmpeg", "-hide_banner", "-loglevel", "error", "-y",
     "-f", "lavfi", "-i", "testsrc2=size=160x90:rate=10", "-t", "2", "-an", "-c:v", "mpeg2video", "-f", "mpegts", "/out/test.ts"], { stdio: "inherit" });
-  run(tool, ["run", "--rm", "--network", "none", "-v", `${root}:/repo:ro`, "-v", `${directory}:/out`, "localhost/vlc-rec-player-builder:1",
-    "x86_64-w64-mingw32-gcc", "-std=gnu11", "-O2", "-static", "-o", "/out/player/embed-probe.exe", "/repo/tests/fixtures/windows-embed-probe.c", "-ladvapi32", "-lgdi32"], { stdio: "inherit" });
   const env = { ...process.env };
   delete env.VLC_REC_LIBVLC_DIR;
   delete env.VLC_PLUGIN_PATH;

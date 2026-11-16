@@ -1,0 +1,10 @@
+{
+  "interface": 1,
+  "id": "camera-preview",
+  "name": "Browser Preview Test Fixture",
+  "version": "1.0.0",
+  "command": {
+    "linux": ["./run.sh"]
+  },
+  "config": []
+}

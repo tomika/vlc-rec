@@ -43,22 +43,30 @@
         </div>
 
         <div class="drawer-item drawer-preview">
-          <div class="options-group">
+          <div class="preview-settings">
+            <label id="previewSourceItem" class="preview-control-row" hidden>
+              <span class="preview-control-label">Preview source</span>
+              <select id="previewSource" class="select-input" aria-label="Preview source">
+                <option value="srt">SRT</option>
+                <option value="camera">Camera (low latency)</option>
+              </select>
+            </label>
+            <p id="previewSourceStatus" class="drawer-hint" hidden></p>
             <label class="reconnect-option" title="Restart VLC when recording stops growing or preview stops receiving data.">
               <input id="autoReconnect" type="checkbox" />
-              Automatically reconnect if the stream stalls
+              <span>Automatically reconnect if the stream stalls</span>
             </label>
-            <label class="buffer-option">
-              Preview buffer
+            <label class="preview-control-row buffer-option">
+              <span class="preview-control-label">Preview buffer</span>
               <input id="previewCaching" class="text-input buffer-input" type="number" min="10" max="10000" step="10" aria-label="Preview buffer in milliseconds" aria-describedby="bufferHint" />
-              ms
+              <span class="preview-control-unit">ms</span>
+            </label>
+            <label class="preview-control-row buffer-option">
+              <span class="preview-control-label">Preview SRT latency</span>
+              <input id="srtLatency" class="text-input buffer-input" type="number" min="1" max="10000" step="10" placeholder="default" aria-label="Preview SRT latency in milliseconds, empty for VLC's default" aria-describedby="srtLatencyHint" />
+              <span class="preview-control-unit">ms</span>
             </label>
           </div>
-          <label class="buffer-option">
-            Preview SRT latency
-            <input id="srtLatency" class="text-input buffer-input" type="number" min="1" max="10000" step="10" placeholder="default" aria-label="Preview SRT latency in milliseconds, empty for VLC's default" aria-describedby="srtLatencyHint" />
-            ms
-          </label>
           <p id="bufferHint" class="drawer-hint">
             Applies when the preview starts, not to one that is running. Less buffer means less delay, but too little
             freezes the picture. How little works depends on the network and this computer: lower it until the picture
@@ -89,13 +97,19 @@
           </div>
           <!-- The camera presets while settings are open. -->
           <div id="presetDrawer" class="preset-row" role="group" aria-label="Camera presets" hidden></div>
-          <label id="cameraClickDelayRow" class="buffer-option" hidden>
-            Double-click interval
-            <input id="cameraClickDelay" class="text-input buffer-input" type="number" min="100" max="1000" step="10" aria-describedby="cameraClickDelayHint" />
-            ms
-          </label>
-          <p id="cameraClickDelayHint" class="drawer-hint" hidden>A shorter interval makes single-click turns faster, but double-clicks must be quicker too.</p>
           <p id="cameraHint" class="drawer-hint"></p>
+          <div id="cameraTelemetry" class="camera-telemetry" hidden>
+            <span id="cameraBattery"></span>
+            <span id="cameraStorage"></span>
+            <span id="cameraRecording"></span>
+            <span id="cameraPower"></span>
+            <div class="camera-action-row">
+              <button id="cameraRecordBtn" class="btn btn-small" type="button" aria-pressed="mixed" hidden>Start camera recording</button>
+              <button id="cameraPowerBtn" class="btn btn-small" type="button" aria-pressed="mixed" hidden>Power camera on</button>
+            </div>
+            <button id="cameraFormatBtn" class="btn btn-small" type="button" hidden>Format SD card…</button>
+            <span id="cameraStorageStatus" role="status"></span>
+          </div>
         </div>
       </section>
 
@@ -114,9 +128,9 @@
             <button id="zoomOutBtn" class="btn btn-zoom" type="button" title="Camera zoom out (mouse wheel down)" aria-label="Camera zoom out">&minus;</button>
             <button id="zoomInBtn" class="btn btn-zoom" type="button" title="Camera zoom in (mouse wheel up)" aria-label="Camera zoom in">+</button>
           </div>
-          <div id="cameraSpeedItem" class="camera-item camera-item-speed" title="How fast the camera turns after a click on the picture, in degrees per second">
-            <input id="cameraSpeed" type="range" min="1" max="90" step="1" value="10" aria-label="Camera turning speed in degrees per second" />
-            <output id="cameraSpeedValue" for="cameraSpeed">10 °/s</output>
+          <div id="cameraSpeedItem" class="camera-item camera-item-speed" title="Camera turning speed as a percentage of its available range">
+            <input id="cameraSpeed" type="range" min="1" max="100" step="1" value="25" aria-label="Camera turning speed percentage" />
+            <output id="cameraSpeedValue" for="cameraSpeed">25%</output>
           </div>
         </div>
 
@@ -141,7 +155,8 @@
     <!-- The native video window of vlc-rec-player is placed exactly over videoHost. -->
     <section id="stage" class="stage">
       <div id="videoHost" class="video-host" aria-label="Video preview">
-        <span class="video-placeholder">Preview appears here</span>
+        <span id="videoPlaceholder" class="video-placeholder">Preview appears here</span>
+        <canvas id="cameraPreviewCanvas" class="camera-preview-canvas" hidden aria-label="Camera preview"></canvas>
       </div>
     </section>
   </div>
@@ -183,6 +198,7 @@
     </div>
   </div>
 
+  <script src="/camera-preview.js"></script>
   <script src="/app.js"></script>
 </body>
 </html>

@@ -44,14 +44,39 @@ const cameraPage = document.getElementById("cameraPage");
 const cameraAddressText = document.getElementById("cameraAddressText");
 const cameraPageBtn = document.getElementById("cameraPageBtn");
 const cameraHintText = document.getElementById("cameraHint");
-const cameraClickDelay = document.getElementById("cameraClickDelay");
-const cameraClickDelayRow = document.getElementById("cameraClickDelayRow");
-const cameraClickDelayHint = document.getElementById("cameraClickDelayHint");
 const cameraZoomItem = document.getElementById("cameraZoomItem");
 const cameraSpeedItem = document.getElementById("cameraSpeedItem");
 const presetBar = document.getElementById("presetBar");
 const presetDrawer = document.getElementById("presetDrawer");
 const presetMenu = document.getElementById("presetMenu");
+const previewSourceItem = document.getElementById("previewSourceItem");
+const previewSourceSelect = document.getElementById("previewSource");
+const previewSourceStatus = document.getElementById("previewSourceStatus");
+const cameraPreviewCanvas = document.getElementById("cameraPreviewCanvas");
+const videoPlaceholder = document.getElementById("videoPlaceholder");
+const cameraTelemetry = document.getElementById("cameraTelemetry");
+const cameraBattery = document.getElementById("cameraBattery");
+const cameraStorage = document.getElementById("cameraStorage");
+const cameraRecording = document.getElementById("cameraRecording");
+const cameraPower = document.getElementById("cameraPower");
+const cameraRecordBtn = document.getElementById("cameraRecordBtn");
+const cameraPowerBtn = document.getElementById("cameraPowerBtn");
+const cameraFormatBtn = document.getElementById("cameraFormatBtn");
+const cameraStorageStatus = document.getElementById("cameraStorageStatus");
+let browserPreview = null;
+let browserPreviewFailed = false;
+let browserPreviewFailure = "";
+let previewSourceRestarting = false;
+let telemetryGeneration = 0;
+let cameraTelemetryValue = null;
+let cameraFormatting = false;
+let cameraActionPending = null;
+let cameraActionGeneration = 0;
+let legacyCameraTurnSpeed;
+let latestVideoPoint = null;
+let latestVideoClientPoint = null;
+let lastRightClickEvent = null;
+let rightVideoPress = false;
 
 const DEFAULT_PARAMS = {
   ip_address: "127.0.0.1:5000",
@@ -64,15 +89,14 @@ const DEFAULT_PARAMS = {
   stall_timeout_sec: 15,
   // Optional camera control through an adapter (plugins/<id>/, docs/camera-plugin-interface.md).
   // camera_plugin is the id of the adapter ("" selects the sole available adapter) and camera_config what its
-  // manifest asks for (the address of the camera, ...). camera_turn_speed is the speed of a turn after
-  // a click in degrees per second; the slider next to the zoom buttons changes it. The zoom step is a
+  // manifest asks for (the address of the camera, ...). camera_turn_speed_percent is a percentage of
+  // the adapter's turning speed range. The zoom step is a
   // percent of the zoom range, the arrow key step is in degrees.
   camera_plugin: "",
   camera_config: {},
-  camera_turn_speed: 10,
+  camera_turn_speed_percent: 25,
   camera_zoom_step: 10,
   camera_arrow_step_deg: 2,
-  camera_double_click_ms: 300,
   // Camera presets 1 to 9: { "1": { pan, tilt, zoom }, ... }. A preset has a position (pan and tilt in degrees),
   // a zoom (0..1 of the range of the camera), or both. The keys 1 to 9 apply one, Alt+number teaches it.
   camera_presets: {},
@@ -81,6 +105,7 @@ const DEFAULT_PARAMS = {
   // decoding, 150 ms froze the picture, 250 ms and more moved, 500 ms lost none. 0 and up is taken as
   // it is; -1 leaves VLC's default.
   preview_caching_ms: 500,
+  preview_source: "srt",
   // SRT latency of the preview in ms, a VLC option on top of the network cache. -1 (the default) leaves VLC's own,
   // which is the same as not having the option. Only a preview takes it: a recording keeps VLC's default, because
   // a low latency drops packets on a lossy link, and a hole in a recording stays there.
@@ -600,10 +625,18 @@ function migrateCameraSettings(loaded) {
 }
 
 async function loadParams() {
+  legacyCameraTurnSpeed = undefined;
   try {
     if (await pathExists(PARAMS_FILE)) {
       const raw = await Neutralino.filesystem.readFile(PARAMS_FILE);
       parameters = { ...parameters, ...migrateCameraSettings(JSON.parse(raw)) };
+      const loaded = JSON.parse(raw);
+      if (loaded && Object.prototype.hasOwnProperty.call(loaded, "camera_turn_speed")) {
+        if (!Object.prototype.hasOwnProperty.call(loaded, "camera_turn_speed_percent")) {
+          legacyCameraTurnSpeed = Number(loaded.camera_turn_speed);
+        }
+        delete parameters.camera_turn_speed;
+      }
     }
   } catch {
     parameters = { ...DEFAULT_PARAMS };
@@ -630,6 +663,7 @@ async function saveParams(ipAddress, outputPathValue, outputFilename) {
 }
 
 function resetState(newStatus = "Stopped.", kind = "info") {
+  stopBrowserPreview();
   activeSession = null;
   mode = "idle";
   currentProcess = null;
@@ -1242,15 +1276,34 @@ function cameraCan(feature) {
   }
 }
 
-// The range of the turning speed slider, in the unit the adapter declares (degrees per second).
+// The turning speed range in the unit the adapter declares.
 function cameraSpeedRange() {
   const caps = cameraCaps();
   const speed = caps && caps.ptz && caps.ptz.speed;
   const min = Number(speed && speed.min);
   const max = Number(speed && speed.max);
-  return Number.isFinite(min) && Number.isFinite(max) && min >= 1 && max > min
-    ? { min: Math.ceil(min), max: Math.floor(max) }
-    : { min: 1, max: 90 };
+  return Number.isFinite(min) && Number.isFinite(max) && max > min
+    ? { min, max, unit: speed.unit || "deg/s" }
+    : { min: 1, max: 90, unit: "deg/s" };
+}
+
+function cameraSpeedValueForPercent(percent) {
+  const range = cameraSpeedRange();
+  const percentage = Math.max(1, Math.min(100, percent));
+  const value = range.min + (percentage - 1) / 99 * (range.max - range.min);
+  return range.unit === "normalized" ? Number(value.toFixed(4)) : Math.round(value);
+}
+
+function migrateLegacyCameraSpeed() {
+  if (!Number.isFinite(legacyCameraTurnSpeed)) return;
+  // Older releases stored an OSC degree/second value against the old 1..90 slider.
+  // Convert that historical value to the shared percentage before adapting to current caps.
+  const fraction = (legacyCameraTurnSpeed - 1) / 89;
+  parameters.camera_turn_speed_percent = Math.max(1, Math.min(100, Math.round(1 + fraction * 99)));
+  delete parameters.camera_turn_speed;
+  legacyCameraTurnSpeed = undefined;
+  saveParams(parameters.ip_address, parameters.output_path, parameters.output_filename)
+    .catch((err) => logDebug(`Could not migrate the camera turning speed: ${normalizeError(err)}`));
 }
 
 // The camera's own control page (where, for example, the SD card can be formatted) opens in the web
@@ -1269,8 +1322,8 @@ function cameraLabel() {
 
 function cameraHint() {
   const parts = [];
-  if (cameraCan("centerOn")) parts.push("Click the picture to centre it.");
-  if (cameraCan("trackPerson")) parts.push("Double-click a person to follow them.");
+  if (cameraCan("centerOn")) parts.push("Right-click the picture to centre it, or press C with the pointer over it.");
+  if (cameraCan("trackPerson")) parts.push("Double-click the picture with the left button or press A with the pointer over it to toggle tracking.");
   if (cameraCan("zoom")) parts.push("Mouse wheel: zoom.");
   if (cameraCan("continuous")) parts.push("Hold arrow keys to turn; release to stop (Shift: faster).");
   else if (cameraCan("nudge")) parts.push("Arrow keys: turn (Shift: larger steps).");
@@ -1286,25 +1339,10 @@ function showCameraPage() {
   const hint = cameraHint();
   const label = cameraLabel();
   const url = cameraPageUrl();
-  cameraPage.hidden = !(cameraCaps() && (hint || label || url));
+  cameraPage.hidden = !(cameraCaps() && (hint || label || url || cameraCaps().telemetry || cameraCaps().record || cameraCaps().power));
   cameraAddressText.textContent = label;
   cameraPageBtn.hidden = !url;
   cameraHintText.textContent = hint;
-  cameraClickDelayRow.hidden = cameraClickDelayHint.hidden = !cameraCan("trackPerson");
-  if (document.activeElement !== cameraClickDelay) cameraClickDelay.value = String(cameraDoubleClickMs());
-}
-
-function cameraDoubleClickMs() {
-  return Math.round(numberParam(parameters.camera_double_click_ms, DEFAULT_PARAMS.camera_double_click_ms, 100, 1000));
-}
-
-function handleCameraClickDelayChange() {
-  const typed = Number(cameraClickDelay.value);
-  parameters.camera_double_click_ms = cameraClickDelay.value !== "" && Number.isFinite(typed)
-    ? Math.max(100, Math.min(1000, Math.round(typed))) : DEFAULT_PARAMS.camera_double_click_ms;
-  cameraClickDelay.value = String(parameters.camera_double_click_ms);
-  saveParams(parameters.ip_address, parameters.output_path, parameters.output_filename)
-    .catch((err) => logDebug(`Could not save the double-click interval: ${normalizeError(err)}`));
 }
 
 async function openCameraPage() {
@@ -1509,6 +1547,52 @@ function failPendingCameraRequests(proc) {
   proc.pending.clear();
 }
 
+function finishCameraAction(action, message) {
+  if (!action || cameraActionPending !== action) return;
+  clearTimeout(action.timer);
+  cameraActionPending = null;
+  cameraStorageStatus.textContent = message;
+  setCameraNote(message);
+  showCameraTelemetry();
+}
+
+function resetCameraAction(message = "") {
+  const action = cameraActionPending;
+  cameraActionGeneration += 1;
+  if (action) {
+    clearTimeout(action.timer);
+    cameraActionPending = null;
+    if (message) cameraStorageStatus.textContent = message;
+  }
+}
+
+function observeCameraAction(proc, value, requestActionGeneration = cameraActionGeneration) {
+  const action = cameraActionPending;
+  if (!action || action.proc !== proc || action.generation !== cameraActionGeneration ||
+      action.generation !== requestActionGeneration || value?.fresh !== true) return;
+  const observed = action.kind === "record"
+    ? value.recording === action.desired
+    : value.power?.on === action.desired;
+  if (!observed) return;
+  action.observed = true;
+  if (action.accepted) {
+    const message = action.kind === "record"
+      ? `Camera recording ${action.desired ? "started" : "stopped"}.`
+      : `Camera powered ${action.desired ? "on" : "off"}.`;
+    finishCameraAction(action, message);
+  }
+}
+
+function beginCameraAction(proc, kind, desired, timeoutMs) {
+  const action = { proc, kind, desired, accepted: false, observed: false, generation: ++cameraActionGeneration, timer: null };
+  cameraActionPending = action;
+  action.onTimeout = () => {
+    finishCameraAction(action, `Camera ${kind === "record" ? "recording" : "power"} state was not confirmed. Check the camera.`);
+  };
+  action.timer = setTimeout(action.onTimeout, timeoutMs);
+  return action;
+}
+
 async function startCamera() {
   if (cameraProc) return;
   const id = String(parameters.camera_plugin || "").trim();
@@ -1554,10 +1638,15 @@ async function connectCamera(proc) {
 function applyCameraCapabilities(proc, caps) {
   stopCameraDrive();
   proc.caps = caps && typeof caps === "object" ? caps : {};
+  migrateLegacyCameraSpeed();
   showCameraControls();
   if (cameraCan("trackStatus")) refreshCameraAiState(proc);
   // The speed is the app's setting, not the adapter's.
-  if (cameraCan("speed")) sendCameraRequest("ptz.setSpeed", { value: cameraTurnSpeed() });
+  if (cameraCan("speed")) sendCameraRequest("ptz.setSpeed", { value: cameraSpeedValueForPercent(cameraTurnSpeed()) });
+  browserPreviewFailed = false;
+  browserPreviewFailure = "";
+  startCameraTelemetry(proc);
+  syncBrowserPreview();
 }
 
 // The panel is arranged differently with the camera controls, so a change arranges it again.
@@ -1567,11 +1656,14 @@ function showCameraControls() {
   cameraZoomItem.hidden = !zoom;
   cameraSpeedItem.hidden = !speed;
   cameraBar.hidden = !(zoom || speed);
+  showCameraPreviewControls();
+  showCameraTelemetry();
   layoutEl.dataset.camera = cameraBar.hidden ? "off" : "on";
   if (speed) {
     const range = cameraSpeedRange();
-    cameraSpeed.min = String(range.min);
-    cameraSpeed.max = String(range.max);
+    cameraSpeed.min = "1";
+    cameraSpeed.max = "100";
+    cameraSpeed.step = "1";
     showCameraSpeed();
   }
   showCameraPage();
@@ -1649,6 +1741,11 @@ async function runCameraAiAction(method, params = {}, verifyStopped = false) {
 
 function stopCamera() {
   stopCameraDrive();
+  stopBrowserPreview();
+  resetCameraAction("Camera action canceled because the adapter is restarting or stopping.");
+  telemetryGeneration += 1;
+  cameraTelemetryValue = null;
+  cameraFormatting = false;
   const proc = cameraProc;
   if (!proc || proc.exited) return;
   proc.stopping = true;
@@ -1675,12 +1772,11 @@ async function restartCamera() {
 }
 
 function cameraTurnSpeed() {
-  const range = cameraSpeedRange();
-  return Math.round(numberParam(parameters.camera_turn_speed, DEFAULT_PARAMS.camera_turn_speed, range.min, range.max));
+  return Math.round(numberParam(parameters.camera_turn_speed_percent, DEFAULT_PARAMS.camera_turn_speed_percent, 1, 100));
 }
 
 function showCameraSpeedValue(speed) {
-  cameraSpeedValue.textContent = `${speed} °/s`;
+  cameraSpeedValue.textContent = `${speed}%`;
 }
 
 function showCameraSpeed() {
@@ -1691,9 +1787,8 @@ function showCameraSpeed() {
 
 // A whole speed within the range the adapter declares, or 0.
 function sliderSpeed() {
-  const range = cameraSpeedRange();
   const speed = Math.round(Number(cameraSpeed.value));
-  return speed >= range.min && speed <= range.max ? speed : 0;
+  return speed >= 1 && speed <= 100 ? speed : 0;
 }
 
 // While the slider is dragged: only the number next to it follows.
@@ -1707,8 +1802,9 @@ function handleCameraSpeedChange() {
   const speed = sliderSpeed();
   if (!speed) return;
   showCameraSpeedValue(speed);
-  parameters.camera_turn_speed = speed;
-  sendCameraRequest("ptz.setSpeed", { value: speed });
+  parameters.camera_turn_speed_percent = speed;
+  delete parameters.camera_turn_speed;
+  sendCameraRequest("ptz.setSpeed", { value: cameraSpeedValueForPercent(speed) });
   saveParams(parameters.ip_address, parameters.output_path, parameters.output_filename).catch(() => {});
 }
 
@@ -1718,7 +1814,10 @@ function handleCameraSpeedChange() {
 function extendCameraBusy(turn) {
   // The adapter reports how long the turn takes; without it the duration follows from the speed.
   const degrees = Math.max(Math.abs(turn.toPan - turn.fromPan), Math.abs(turn.toTilt - turn.fromTilt));
-  const turnMs = Number.isFinite(turn.durationMs) ? turn.durationMs : degrees / cameraTurnSpeed() * 1000;
+  const range = cameraSpeedRange();
+  const fallbackMs = range.unit === "deg/s"
+    ? degrees / cameraSpeedValueForPercent(cameraTurnSpeed()) * 1000 : CAMERA_CLICK_COOLDOWN_MS;
+  const turnMs = Number.isFinite(turn.durationMs) ? turn.durationMs : fallbackMs;
   cameraBusyUntil = Math.max(cameraBusyUntil, Date.now() + CAMERA_TURN_START_MS + turnMs + CAMERA_PICTURE_LAG_MS);
 }
 
@@ -1743,8 +1842,14 @@ function handleCameraMessage(proc, message) {
     proc.aiRevision = (proc.aiRevision || 0) + 1;
     proc.aiEnabled = null;
     proc.caps = null;
+    stopBrowserPreview();
+    telemetryGeneration += 1;
+    resetCameraAction("Camera action canceled because the camera connection was lost.");
+    cameraTelemetryValue = null;
+    const formattingLost = cameraFormatting;
+    if (formattingLost) finishCameraFormatting(proc, null);
     showCameraControls();
-    setCameraNote(String(message.reason || "the camera is not reachable."));
+    if (!formattingLost) setCameraNote(String(message.reason || "the camera is not reachable."));
   }
 }
 
@@ -1773,12 +1878,18 @@ function handleCameraProcessEvent(evt) {
     handleCameraOutput(String(detail.data || ""));
   } else if (detail.action === "exit") {
     const proc = cameraProc;
+    const formattingLost = cameraFormatting;
+    if (formattingLost) finishCameraFormatting(proc, null);
     stopCameraDrive();
+    stopBrowserPreview();
+    telemetryGeneration += 1;
+    resetCameraAction("Camera action canceled because the adapter stopped.");
+    cameraTelemetryValue = null;
     cameraProc = null;
     proc.exited = true;
     failPendingCameraRequests(proc);
     showCameraControls();
-    if (!proc.restarting && !proc.stopping) setCameraNote("the camera adapter stopped.");
+    if (!formattingLost && !proc.restarting && !proc.stopping) setCameraNote("the camera adapter stopped.");
   }
 }
 
@@ -1786,7 +1897,7 @@ function handleCameraProcessEvent(evt) {
 function turnCameraTo(x, y) {
   if (!cameraCan("centerOn") || mode === "idle" || !scanDialog.hidden) return;
   if (!(x >= 0 && x <= 1 && y >= 0 && y <= 1)) return;
-  // A click in the middle needs no turn, and a double click must not turn twice.
+  // A click in the middle needs no turn.
   if (Math.abs(x - 0.5) < 0.02 && Math.abs(y - 0.5) < 0.02) return;
   if (Date.now() < cameraBusyUntil) return;
   cameraBusyUntil = Date.now() + CAMERA_CLICK_COOLDOWN_MS;
@@ -1806,8 +1917,6 @@ function zoomCamera(delta) {
   sendCameraRequest("zoom.by", { delta: delta / 100 });
 }
 
-let videoClickGeneration = 0;
-let videoClickPending = null;
 function videoPoint(evt) {
   const rect = videoHost.getBoundingClientRect();
   if (!(rect.width > 0 && rect.height > 0)) return null;
@@ -1817,29 +1926,8 @@ function videoPoint(evt) {
   return x >= 0 && x <= 1 && y >= 0 && y <= 1 ? { x, y } : null;
 }
 
-function handleVideoClick(evt) {
-  const point = videoPoint(evt);
-  if (!point || evt.detail > 1) return;
-  if (!cameraCan("trackPerson")) return turnCameraTo(point.x, point.y);
-  const generation = ++videoClickGeneration, proc = cameraProc, video = currentProcess;
-  videoClickPending = { proc, video };
-  setTimeout(() => {
-    if (generation === videoClickGeneration) {
-      videoClickPending = null;
-      if (proc === cameraProc && video === currentProcess)
-        turnCameraTo(point.x, point.y);
-    }
-  }, cameraDoubleClickMs());
-}
-
-function handleVideoDoubleClick(evt) {
-  const pending = videoClickPending;
-  videoClickPending = null;
-  ++videoClickGeneration;
-  if (!pending || pending.proc !== cameraProc || pending.video !== currentProcess ||
-      !cameraCan("trackPerson") || mode === "idle" || !scanDialog.hidden) return;
-  const point = videoPoint(evt);
-  if (!point) return;
+function toggleCameraAiAt(point) {
+  if (!point || !cameraCan("trackPerson") || mode === "idle" || !scanDialog.hidden) return;
   const params = { x: Number(point.x.toFixed(4)), y: Number(point.y.toFixed(4)) };
   if (!cameraCan("trackStatus")) return sendCameraRequest("ai.trackPerson", params);
   const proc = cameraProc;
@@ -1849,6 +1937,68 @@ function handleVideoDoubleClick(evt) {
     return;
   }
   runCameraAiAction(proc.aiEnabled ? "ai.stop" : "ai.trackPerson", params);
+}
+
+function handleRightCameraClick(evt) {
+  const now = Date.now(), point = videoPoint(evt);
+  if (!point || mode === "idle" || !scanDialog.hidden) return;
+  if (evt.source && lastRightClickEvent && evt.source !== lastRightClickEvent.source && now - lastRightClickEvent.at < 40 &&
+      Math.hypot(evt.clientX - lastRightClickEvent.x, evt.clientY - lastRightClickEvent.y) < 4) return;
+  lastRightClickEvent = { at: now, x: evt.clientX, y: evt.clientY, source: evt.source };
+  latestVideoPoint = point;
+  latestVideoClientPoint = { clientX: evt.clientX, clientY: evt.clientY };
+  turnCameraTo(point.x, point.y);
+}
+
+function handleVideoDoubleClick(evt) {
+  if (evt.button !== 0) return;
+  const point = videoPoint(evt);
+  if (!point) return;
+  evt.preventDefault?.();
+  latestVideoPoint = point;
+  latestVideoClientPoint = { clientX: evt.clientX, clientY: evt.clientY };
+  toggleCameraAiAt(point);
+}
+
+function handleVideoPointerMove(evt) {
+  latestVideoPoint = videoPoint(evt);
+  latestVideoClientPoint = latestVideoPoint ? { clientX: evt.clientX, clientY: evt.clientY } : null;
+}
+function clearVideoPointer() {
+  latestVideoPoint = null;
+  latestVideoClientPoint = null;
+  rightVideoPress = false;
+  lastRightClickEvent = null;
+}
+function handleVideoMouseDown(evt) { if (evt.button === 2) rightVideoPress = true; }
+function handleVideoMouseUp(evt) {
+  if (evt.button === 2 && rightVideoPress) {
+    rightVideoPress = false;
+    handleRightCameraClick({ clientX: evt.clientX, clientY: evt.clientY, source: "mouseup" });
+  }
+}
+function handleVideoContextMenu(evt) {
+  evt.preventDefault();
+  if (evt.button === 2 && !rightVideoPress) handleRightCameraClick({ clientX: evt.clientX, clientY: evt.clientY, source: "contextmenu" });
+}
+
+function handleCameraLetterKey(evt) {
+  if (evt.repeat || evt.ctrlKey || evt.altKey || evt.metaKey || evt.shiftKey || isTypingTarget(evt) ||
+      !scanDialog.hidden || !presetMenu.hidden || !latestVideoPoint || mode === "idle") return false;
+  const key = String(evt.key || "").toLowerCase();
+  const point = latestVideoClientPoint ? videoPoint(latestVideoClientPoint) : latestVideoPoint;
+  if (!point) return false;
+  if (key === "c" && cameraCan("centerOn")) {
+    evt.preventDefault();
+    turnCameraTo(point.x, point.y);
+    return true;
+  }
+  if (key === "a" && cameraCan("trackPerson")) {
+    evt.preventDefault();
+    toggleCameraAiAt(point);
+    return true;
+  }
+  return false;
 }
 
 // A wheel notch is half a button step. Wheel up zooms in.
@@ -1892,12 +2042,21 @@ function handleArrowKey(evt) {
 // Single-axis adapters use the most recently pressed key. Releasing it resumes
 // an earlier held key. Heartbeats renew the lease without restarting the motor.
 function updateCameraDrive() {
-  const held = [...cameraHeldKeys.values()].at(-1);
+  const keys = [...cameraHeldKeys.values()];
+  const held = keys.at(-1);
   if (!held || !cameraCan("continuous")) return stopCameraDrive();
   if (cameraDrive) clearTimeout(cameraDrive.timer);
   const base = Number(cameraCaps().ptz.continuous.defaultSpeed) || 0.2;
   const speed = Math.min(1, Math.max(0.01, base) * (held.shift ? 5 : 1));
-  const drive = { proc: cameraProc, pan: held.direction[0] * speed, tilt: held.direction[1] * speed };
+  let direction = held.direction;
+  if (cameraCaps().ptz.continuous.axes === "both") {
+    direction = [0, 0];
+    for (const key of keys) {
+      if (key.direction[0]) direction[0] = key.direction[0];
+      if (key.direction[1]) direction[1] = key.direction[1];
+    }
+  }
+  const drive = { proc: cameraProc, pan: direction[0] * speed, tilt: direction[1] * speed };
   cameraDrive = drive;
   const renew = () => {
     if (cameraDrive !== drive || cameraProc !== drive.proc) return;
@@ -1940,6 +2099,7 @@ function handleKeyDown(evt) {
       return;
     }
   }
+  if (handleCameraLetterKey(evt)) return;
   if (!presetMenu.hidden && handlePresetMenuKey(evt)) return;
   if (handlePresetKey(evt)) return;
   handleArrowKey(evt);
@@ -2017,13 +2177,13 @@ function renderPresetRow(container) {
     button.type = "button";
     button.className = `preset-btn${kind ? ` is-${kind}` : ""}${slot === 0 ? " is-fixed" : ""}`;
     button.textContent = String(slot);
-    button.title = presetTitle(slot, container === presetDrawer);
-    button.setAttribute("aria-label", presetTitle(slot, container === presetDrawer));
+    button.title = presetTitle(slot, container === presetDrawer || Boolean(browserPreview));
+    button.setAttribute("aria-label", button.title);
     button.dataset.slot = String(slot);
     button.addEventListener("click", () => applyPreset(slot));
     button.addEventListener("contextmenu", (evt) => {
       evt.preventDefault();
-      if (container === presetDrawer) openPresetMenu(slot, button);
+      if (container === presetDrawer || browserPreview) openPresetMenu(slot, button);
     });
     buttons.push(button);
   }
@@ -2068,7 +2228,10 @@ async function applyPreset(slot) {
     setCameraNote(`this camera cannot apply preset ${slot}.`);
     return;
   }
-  if (cameraCan("trackStatus") && !await runCameraAiAction("ai.stop", {}, true)) return;
+  if (canMove) {
+    stopCameraDrive();
+    if (cameraCan("trackStatus") && !await runCameraAiAction("ai.stop", {}, true)) return;
+  }
   let sent = false;
   if (preset.pan !== undefined && cameraCan("moveTo")) {
     sendCameraRequest("ptz.moveTo", { pan: preset.pan, tilt: preset.tilt });
@@ -2171,7 +2334,7 @@ function handlePresetKey(evt) {
 }
 
 // ---- the menu of a preset button ----
-// Keep the menu in the settings drawer, clear of the native video window.
+// Native VLC requires drawer bounds. The HTML renderer permits a viewport overlay.
 
 function menuItem(label, keys, enabled, run) {
   const item = document.createElement("button");
@@ -2213,11 +2376,16 @@ function openPresetMenu(slot, anchor) {
   );
   presetMenu.hidden = false;
 
-  // Keep the menu inside the visible part of the drawer, even when the panel scrolls.
+  // HTML video shares the page's stacking context. Native VLC remains above
+  // page elements, so its menus must stay within the visible settings drawer.
   const margin = 4;
   const drawerBox = drawer.getBoundingClientRect();
   const panelBox = panel.getBoundingClientRect();
-  const bounds = {
+  const bounds = browserPreview ? {
+    left: margin, top: margin,
+    right: (window.innerWidth || 1280) - margin,
+    bottom: (window.innerHeight || 720) - margin
+  } : {
     left: Math.max(margin, drawerBox.left, panelBox.left),
     top: Math.max(margin, drawerBox.top, panelBox.top),
     right: Math.min(window.innerWidth || 1280, drawerBox.right, panelBox.right) - margin,
@@ -2260,6 +2428,352 @@ function handleWindowPointerDown(evt) {
   if (presetMenu.hidden) return;
   const inside = typeof presetMenu.contains === "function" && presetMenu.contains(evt.target);
   if (!inside) closePresetMenu();
+}
+
+function cameraPreviewAvailable() {
+  return cameraCaps()?.preview?.format === "hevc-annexb-v1";
+}
+
+function showCameraPreviewControls() {
+  const available = cameraPreviewAvailable();
+  const preferred = parameters.preview_source === "camera";
+  previewSourceItem.hidden = !available && !preferred;
+  previewSourceSelect.disabled = uiBusy || scanState.running;
+  const cameraOption = previewSourceSelect.querySelector?.('option[value="camera"]');
+  if (cameraOption) cameraOption.disabled = !available;
+  previewSourceSelect.value = available && preferred && !browserPreviewFailed ? "camera" : "srt";
+  previewSourceStatus.hidden = previewSourceItem.hidden;
+  previewSourceStatus.textContent = browserPreviewFailure || (preferred && !available
+    ? "Camera preview is unavailable; displaying SRT."
+    : "Recording always uses SRT. Switch to SRT to check the recorded stream.");
+}
+
+function stopBrowserPreview() {
+  const state = browserPreview;
+  browserPreview = null;
+  state?.client?.close();
+  if (state && cameraProc === state.proc && !state.proc.exited && !state.proc.stopping) {
+    cameraRequest(state.proc, "preview.close", {}).catch(() => {});
+  }
+  cameraPreviewCanvas.hidden = true;
+  videoPlaceholder.hidden = false;
+  videoPlaceholder.textContent = "Preview appears here";
+  if (state) {
+    closePresetMenu();
+    renderPresets();
+    if (currentProcess?.srtVideoSize) setVideoSize(currentProcess.srtVideoSize);
+    if (scanDialog.hidden && presetMenu.hidden) sendPlayerCommand("SHOW");
+  }
+}
+
+function syncBrowserPreview() {
+  showCameraPreviewControls();
+  const wanted = mode !== "idle" && parameters.preview_source === "camera" &&
+    cameraPreviewAvailable() && !browserPreviewFailed && !previewSourceRestarting;
+  if (!wanted) { if (browserPreview) stopBrowserPreview(); return; }
+  if (browserPreview?.proc === cameraProc) return;
+  stopBrowserPreview();
+  const state = browserPreview = { proc: cameraProc, client: null };
+  videoHost.hidden = false;
+  videoPlaceholder.hidden = false;
+  videoPlaceholder.textContent = "Connecting to camera preview…";
+  sendPlayerCommand("HIDE");
+  renderPresets();
+  const failed = (error) => {
+    if (browserPreview !== state) return;
+    browserPreviewFailed = true;
+    browserPreviewFailure = `Camera preview unavailable; displaying SRT. ${normalizeError(error)}`;
+    stopBrowserPreview();
+    showCameraPreviewControls();
+    setCameraNote(browserPreviewFailure);
+  };
+  cameraRequest(state.proc, "preview.open", {}).then(async (session) => {
+    if (browserPreview !== state) return;
+    if (typeof CameraPreview === "undefined") throw new Error("The browser preview player is missing.");
+    const client = state.client = new CameraPreview({
+      canvas: cameraPreviewCanvas,
+      onFrame() {
+        if (browserPreview !== state) return;
+        cameraPreviewCanvas.hidden = false;
+        videoPlaceholder.hidden = true;
+      },
+      onDimensions({ width, height }) {
+        if (browserPreview !== state) return;
+        const aspect = displayAspect({ width, height });
+        if (aspect) { videoAspect = aspect; updateLayout(); }
+      },
+      onError: failed
+    });
+    await client.start(session);
+  }).catch(failed);
+}
+
+async function handlePreviewSourceChange() {
+  if (uiBusy || scanState.running) { showCameraPreviewControls(); return; }
+  previewSourceRestarting = mode !== "recording";
+  parameters.preview_source = previewSourceSelect.value === "camera" ? "camera" : "srt";
+  browserPreviewFailed = false;
+  browserPreviewFailure = "";
+  clearVideoPointer();
+  saveParams(parameters.ip_address, parameters.output_path, parameters.output_filename)
+    .catch((err) => logDebug(`Could not save the preview source: ${normalizeError(err)}`));
+  // Recording owns its SRT process and file. Only renew the displayed camera
+  // session here; a preview-only session can safely release and reopen SRT.
+  stopBrowserPreview();
+  if (mode === "recording") { syncBrowserPreview(); return; }
+  try {
+    await withBusy(async () => {
+      const request = mode === "preview" && activeSession
+        ? { ...activeSession.request, record: false } : { record: false, ...payload() };
+      if (mode === "preview") await terminateCurrent("Restarting the preview...", { waitForExit: true });
+      const result = await startOperation(request);
+      await refreshState();
+      if (!result.ok) await showError(result.error);
+    });
+  } finally {
+    previewSourceRestarting = false;
+    syncBrowserPreview();
+  }
+}
+
+function cameraStorageCanFormat() {
+  const value = cameraTelemetryValue;
+  return Boolean(cameraCaps()?.storage?.format && !cameraFormatting && !cameraActionPending && value?.fresh === true && value.recording === false &&
+    value.storage && ["ready", "full", "unsupported", "error", "readonly", "unformatted"].includes(value.storage.status));
+}
+
+function showCameraTelemetry() {
+  const caps = cameraCaps();
+  cameraTelemetry.hidden = !(caps?.telemetry || caps?.record || caps?.power || caps?.storage?.format);
+  cameraBattery.hidden = !caps?.telemetry?.battery;
+  cameraStorage.hidden = !caps?.telemetry?.storage;
+  cameraRecording.hidden = !caps?.telemetry?.storage && !caps?.telemetry?.recording;
+  cameraPower.hidden = !caps?.telemetry?.power && !caps?.power;
+  cameraRecordBtn.hidden = !(caps?.record?.start || caps?.record?.stop);
+  cameraPowerBtn.hidden = !(caps?.power?.on || caps?.power?.off);
+  cameraFormatBtn.hidden = !caps?.storage?.format;
+  const value = cameraTelemetryValue?.fresh === true ? cameraTelemetryValue : null;
+  const recordingKnown = value?.recording === true || value?.recording === false;
+  const canStart = Boolean(value && recordingKnown && value.recording === false &&
+    !cameraFormatting && (!caps?.telemetry?.storage || value.storage?.status === "ready") &&
+    (!caps?.power || value.power?.on === true));
+  const canStop = Boolean(value && recordingKnown && value.recording === true);
+  const recording = value?.recording === true;
+  const powered = value?.power?.on === true;
+  const recordAction = cameraActionPending?.kind === "record" ? cameraActionPending : null;
+  const powerAction = cameraActionPending?.kind === "power" ? cameraActionPending : null;
+  cameraRecordBtn.textContent = recordAction
+    ? recordAction.desired ? "Starting camera recording…" : "Stopping camera recording…"
+    : recording ? "Stop camera recording" : "Start camera recording";
+  cameraRecordBtn.disabled = Boolean(cameraActionPending || (recording
+    ? !caps?.record?.stop || !canStop : !caps?.record?.start || !canStart));
+  cameraRecordBtn.title = !recording && cameraFormatting
+    ? "Camera recording cannot start while SD formatting is in progress."
+    : !recordingKnown ? "Waiting for fresh camera recording status." : cameraRecordBtn.textContent;
+  cameraRecordBtn.setAttribute("aria-pressed", recordingKnown ? String(recording) : "mixed");
+  cameraPowerBtn.textContent = powerAction
+    ? powerAction.desired ? "Powering camera on…" : "Powering camera off…"
+    : powered ? "Power camera off" : "Power camera on";
+  cameraPowerBtn.disabled = Boolean(cameraActionPending || (powered
+    ? !caps?.power?.off || cameraFormatting || !caps?.telemetry?.recording || value?.recording !== false
+    : !caps?.power?.on));
+  cameraPowerBtn.setAttribute("aria-pressed", typeof value?.power?.on === "boolean" ? String(powered) : "mixed");
+  cameraFormatBtn.disabled = Boolean(cameraFormatting || cameraActionPending || !cameraStorageCanFormat());
+  const battery = value?.battery;
+  cameraBattery.textContent = battery?.present === true && Number.isFinite(battery.level) && battery.level >= 0 && battery.level <= 1
+    ? `Battery: ${Math.round(battery.level * 100)}%${battery.charging ? " · Charging" : ""}` : "Battery: unavailable";
+  const card = value?.storage;
+  const sized = card && Number.isFinite(card.totalBytes) && Number.isFinite(card.freeBytes) &&
+    card.totalBytes >= card.freeBytes && card.freeBytes >= 0;
+  cameraStorage.textContent = sized && card.status !== "absent"
+    ? `SD: ${storageSize(card.freeBytes)} free · ${storageSize(card.totalBytes - card.freeBytes)} used / ${storageSize(card.totalBytes)} total (${card.status})`
+    : "SD: unavailable";
+  if (sized && Number.isFinite(card.remainingSeconds) && card.remainingSeconds >= 0)
+    cameraStorage.textContent += ` · ~${Math.floor(card.remainingSeconds / 60)} min remaining`;
+  cameraRecording.textContent = value?.recording === true ? "Camera recording: on"
+    : value?.recording === false ? "Camera recording: off" : "Camera recording: unavailable";
+  cameraPower.textContent = value?.power?.on === true ? "Camera power: on"
+    : value?.power?.on === false ? "Camera power: off" : "Camera power: unavailable";
+  if (caps?.power?.off && value?.power?.on === true && cameraFormatting) {
+    cameraPower.textContent += " · Power off unavailable during SD formatting.";
+    cameraPowerBtn.title = "Power off is unavailable while SD formatting is in progress.";
+  } else if (caps?.power?.off && value?.power?.on === true && (!caps?.telemetry?.recording || value.recording !== false)) {
+    const reason = value.recording === true ? "camera recording is active" : "camera recording state is unknown";
+    cameraPower.textContent += ` · Power off unavailable until ${reason === "camera recording is active" ? "it stops" : "its state is known"}.`;
+    cameraPowerBtn.title = `Stop camera recording or wait for a fresh off status; ${reason}.`;
+  } else cameraPowerBtn.title = cameraPowerBtn.textContent;
+}
+
+function toggleCameraRecording() {
+  const value = cameraTelemetryValue;
+  if (value?.fresh !== true || typeof value.recording !== "boolean") return;
+  return cameraRecordAction(!value.recording);
+}
+
+function toggleCameraPower() {
+  const powered = cameraTelemetryValue?.fresh === true && cameraTelemetryValue.power?.on === true;
+  return cameraPowerAction(!powered);
+}
+
+async function cameraRecordAction(start) {
+  const caps = cameraCaps();
+  const value = cameraTelemetryValue;
+  const allowed = value?.fresh === true && value.recording === (start ? false : true) &&
+    (!start || (!cameraFormatting && (!caps?.telemetry?.storage || value.storage?.status === "ready") &&
+      (!caps?.power || value.power?.on === true)));
+  if (cameraActionPending || !caps?.record?.[start ? "start" : "stop"] || !allowed) return;
+  const proc = cameraProc;
+  const action = beginCameraAction(proc, "record", start, 30000);
+  showCameraTelemetry();
+  cameraStorageStatus.textContent = start ? "Starting camera recording…" : "Stopping camera recording…";
+  try {
+    const result = await cameraRequest(proc, start ? "record.start" : "record.stop", {});
+    if (cameraProc !== proc) return;
+    if (cameraActionPending !== action) return;
+    if (result.accepted !== true) throw new Error("The camera did not confirm the recording command was accepted.");
+    action.accepted = true;
+    if (action.observed) finishCameraAction(action, `Camera recording ${start ? "started" : "stopped"}.`);
+    else cameraStorageStatus.textContent = start
+      ? "Camera recording command accepted; waiting for camera status…"
+      : "Camera stop command accepted; waiting for camera status…";
+    if (cameraActionPending === action && !action.observed) setCameraNote(cameraStorageStatus.textContent);
+  } catch (error) {
+    if (cameraProc === proc) finishCameraAction(action, normalizeError(error));
+  } finally {
+    // An accepted operation stays locked until telemetry confirms it or its deadline expires.
+    showCameraTelemetry();
+  }
+}
+
+async function cameraPowerAction(on) {
+  const caps = cameraCaps();
+  const value = cameraTelemetryValue;
+  if (cameraActionPending || !caps?.power?.[on ? "on" : "off"]) return;
+  if (on ? value?.fresh === true && value.power?.on === true : value?.fresh !== true || value?.power?.on !== true) return;
+  if (!on && cameraFormatting) {
+    cameraStorageStatus.textContent = "Power off is unavailable while SD formatting is in progress.";
+    return;
+  }
+  if (!on && (!caps.telemetry?.recording || value?.recording !== false)) {
+    cameraStorageStatus.textContent = value?.recording === true
+      ? "Stop camera recording before powering off the camera."
+      : "Power off is unavailable until camera recording is freshly confirmed off.";
+    return;
+  }
+  const proc = cameraProc;
+  if (!on && mode === "recording") {
+    const reason = "The camera may be providing the SRT stream currently being recorded. Powering it off can interrupt that recording. Power off the camera?";
+    const choice = await Neutralino.os.showMessageBox("Power off camera", reason, "YES_NO", "WARNING");
+    if (choice !== "YES" || cameraProc !== proc || cameraCaps() !== caps || cameraFormatting || cameraActionPending ||
+      cameraTelemetryValue?.fresh !== true || cameraTelemetryValue.power?.on !== true || cameraTelemetryValue.recording !== false) return;
+  }
+  const action = beginCameraAction(proc, "power", on, on ? 45000 : 45000);
+  showCameraTelemetry();
+  cameraStorageStatus.textContent = on ? "Requesting camera power on…" : "Requesting camera power off…";
+  try {
+    const result = await cameraRequest(proc, "power.set", { on });
+    if (cameraProc !== proc) return;
+    if (cameraActionPending !== action) return;
+    if (result.accepted !== true) throw new Error("The camera did not confirm the power command was accepted.");
+    action.accepted = true;
+    if (action.observed) finishCameraAction(action, `Camera powered ${on ? "on" : "off"}.`);
+    else cameraStorageStatus.textContent = on
+      ? "Camera power-on command accepted; waiting for camera status…"
+      : "Camera power-off command accepted; waiting for camera status…";
+    if (cameraActionPending === action && !action.observed) setCameraNote(cameraStorageStatus.textContent);
+  } catch (error) {
+    if (cameraProc === proc) finishCameraAction(action, normalizeError(error));
+  } finally {
+    showCameraTelemetry();
+  }
+}
+
+function storageSize(bytes) {
+  const units = ["B", "KiB", "MiB", "GiB", "TiB"];
+  let index = 0;
+  while (bytes >= 1024 && index < units.length - 1) { bytes /= 1024; index += 1; }
+  return `${bytes.toFixed(index ? 2 : 0)} ${units[index]}`;
+}
+
+function startCameraTelemetry(proc) {
+  const generation = ++telemetryGeneration;
+  cameraTelemetryValue = null;
+  showCameraTelemetry();
+  if (!proc.caps?.telemetry) return;
+  const interval = numberParam(proc.caps.telemetry.pollMs, 1000, 500, 10000);
+  const poll = async () => {
+    if (generation !== telemetryGeneration || cameraProc !== proc || proc.exited || proc.stopping) return;
+    const formatGeneration = proc.formatGeneration || 0;
+    // A response to an earlier poll cannot confirm an action issued while that
+    // read was in flight, even if the adapter marks its snapshot fresh.
+    const actionGeneration = cameraActionGeneration;
+    try {
+      const value = await cameraRequest(proc, "telemetry.get", {});
+      if (generation !== telemetryGeneration || cameraProc !== proc) return;
+      cameraTelemetryValue = value;
+      observeCameraAction(proc, value, actionGeneration);
+      if (cameraFormatting && formatGeneration === proc.formatGeneration) {
+        const state = value.fresh === true ? value.storage?.status : null;
+        if (value.fresh === true && (state === "preparing" || state === "initializing" || value.storage?.formatting === true)) proc.formatSawBusy = true;
+        if (value.fresh === true && value.storage?.formatFailed === true) proc.formatFailedObserved = true;
+        if ((value.fresh === true && value.storage?.formatCompleted === true) ||
+          (state === "ready" && proc.formatSawBusy)) proc.formatCompleteObserved = true;
+        if (proc.formatAccepted && proc.formatFailedObserved) finishCameraFormatting(proc, false);
+        else if (proc.formatAccepted && proc.formatCompleteObserved) finishCameraFormatting(proc, true);
+      }
+    } catch (_) {
+      if (generation === telemetryGeneration) cameraTelemetryValue = null;
+    }
+    if (cameraFormatting && Date.now() - proc.formatStartedAt > 120000) finishCameraFormatting(proc, null);
+    if (generation !== telemetryGeneration || cameraProc !== proc || proc.stopping) return;
+    showCameraTelemetry();
+    setTimeout(poll, interval);
+  };
+  poll();
+}
+
+async function formatCameraStorage() {
+  if (!cameraStorageCanFormat() || cameraFormatting) return;
+  const proc = cameraProc;
+  const choice = await Neutralino.os.showMessageBox("Format SD card",
+    "All files on the camera's SD card will be permanently deleted. Format the card?", "YES_NO", "WARNING");
+  if (choice !== "YES" || cameraProc !== proc || !cameraStorageCanFormat()) return;
+  cameraFormatting = true;
+  const formatGeneration = proc.formatGeneration = (proc.formatGeneration || 0) + 1;
+  proc.formatStartedAt = Date.now();
+  proc.formatSawBusy = false;
+  proc.formatAccepted = false;
+  proc.formatCompleteObserved = false;
+  proc.formatFailedObserved = false;
+  cameraStorageStatus.textContent = "Requesting SD formatting…";
+  showCameraTelemetry();
+  try {
+    const result = await cameraRequest(proc, "storage.format", { confirmed: true }, 15000);
+    if (cameraProc !== proc || !cameraFormatting || proc.formatGeneration !== formatGeneration) return;
+    if (result.accepted !== true) throw new Error("The camera did not accept formatting.");
+    proc.formatAccepted = true;
+    if (proc.formatFailedObserved) finishCameraFormatting(proc, false);
+    else if (proc.formatCompleteObserved) finishCameraFormatting(proc, true);
+    else cameraStorageStatus.textContent = "Formatting accepted; waiting for updated card status…";
+  } catch (error) {
+    if (cameraProc !== proc || !cameraFormatting || proc.formatGeneration !== formatGeneration) return;
+    cameraFormatting = false;
+    const message = `SD formatting was not accepted: ${normalizeError(error)}`;
+    cameraStorageStatus.textContent = message;
+    setCameraNote(message);
+  }
+  showCameraTelemetry();
+}
+
+function finishCameraFormatting(proc, result) {
+  if (cameraProc !== proc || !cameraFormatting) return;
+  cameraFormatting = false;
+  const message = result === true ? "SD formatting completed."
+    : result === false ? "SD formatting failed. Check the card and camera."
+      : "Formatting completion could not be confirmed. Check the camera.";
+  cameraStorageStatus.textContent = message;
+  setCameraNote(message);
+  showCameraTelemetry();
 }
 
 function videoRectArg() {
@@ -2361,7 +2875,7 @@ function handlePreviewCachingChange() {
 function restartPreview() {
   return withBusy(async () => {
     if (mode !== "preview") return;
-    await terminateCurrent("Restarting the preview...");
+    await terminateCurrent("Restarting the preview...", { waitForExit: true });
     const result = await startOperation({ record: false, ...payload() });
     await refreshState();
     if (!result.ok) await showError(result.error);
@@ -2380,6 +2894,7 @@ function buildPlayerCommand(playerPath, streamUri, record, ext, fullOutput, rect
 function sendPlayerCommand(line) {
   const proc = currentProcess;
   if (!proc || !proc.player || proc.exited) return;
+  if (line === "SHOW" && browserPreview) line = "HIDE";
   Neutralino.os.updateSpawnedProcess(proc.id, "stdIn", `${line}\n`).catch(() => {});
 }
 
@@ -2433,6 +2948,8 @@ function displayAspect({ width, height, sarNum, sarDen }) {
 }
 
 function setVideoSize(message) {
+  if (currentProcess) currentProcess.srtVideoSize = message;
+  if (browserPreview) return;
   const aspect = displayAspect(message);
   if (!aspect || Math.abs(aspect - videoAspect) < 1e-6) return;
   logDebug(`Video size ${message.width}x${message.height}, sample aspect ${message.sarNum}:${message.sarDen}`);
@@ -2792,7 +3309,8 @@ async function stopVlcGracefully(proc, options = {}) {
   scheduleProcessExit(procId, secondExitMs, { warningText, warningState });
 }
 
-async function terminateCurrent(newStatus = "Stopped.") {
+async function terminateCurrent(newStatus = "Stopped.", options = {}) {
+  stopBrowserPreview();
   const proc = currentProcess;
   const wasRecording = mode === "recording";
   operationToken += 1;
@@ -2802,10 +3320,16 @@ async function terminateCurrent(newStatus = "Stopped.") {
     if (proc && proc.type === "sim") {
       proc.running = false;
     } else if (proc && proc.type === "real") {
-      await stopVlcGracefully(proc, { wasRecording });
+      await stopVlcGracefully(proc, { wasRecording, waitForExit: Boolean(options.waitForExit) });
     }
-  } catch {
-    // Ignore termination errors.
+  } catch (err) {
+    if (options.waitForExit) {
+      // Keep a failed stop reachable for a later Stop attempt. Do not launch
+      // a second SRT connection while the old process may still be alive.
+      currentProcess = proc;
+      if (proc) proc.token = operationToken;
+      throw err;
+    }
   }
 
   resetState(newStatus);
@@ -3138,6 +3662,8 @@ async function startOperation({ record, ipAddress, outputPathValue, filenameBase
 
   startingStream = false;
   mode = record ? "recording" : "preview";
+  if (!recoverySession) { browserPreviewFailed = false; browserPreviewFailure = ""; }
+  syncBrowserPreview();
   activeSession = recoverySession || createSession({ record, ipAddress, outputPathValue, filenameBase: outputFilename, ext });
   resetSessionProgress(activeSession);
   startTimeMs = Date.now();
@@ -3186,6 +3712,7 @@ function updateButtons() {
   scanBtn.disabled = uiBusy || scanState.running;
   autoReconnect.disabled = uiBusy;
   bufferApplyBtn.disabled = uiBusy;
+  syncBrowserPreview();
 }
 
 function applyState(state) {
@@ -3481,18 +4008,28 @@ scanDialog.addEventListener("click", (evt) => {
 
 // The native video window may or may not pass mouse input on to the page, depending on the
 // platform; both are plain page events here.
-videoHost.addEventListener("click", handleVideoClick);
+videoHost.addEventListener("pointermove", handleVideoPointerMove);
+videoHost.addEventListener("pointerenter", handleVideoPointerMove);
+videoHost.addEventListener("pointerleave", clearVideoPointer);
+videoHost.addEventListener("pointercancel", clearVideoPointer);
+videoHost.addEventListener("lostpointercapture", clearVideoPointer);
+videoHost.addEventListener("mousedown", handleVideoMouseDown);
+videoHost.addEventListener("mouseup", handleVideoMouseUp);
 videoHost.addEventListener("dblclick", handleVideoDoubleClick);
+videoHost.addEventListener("contextmenu", handleVideoContextMenu);
 stage.addEventListener("wheel", handleStageWheel, { passive: false });
 zoomInBtn.addEventListener("click", () => zoomCamera(cameraZoomStep()));
 zoomOutBtn.addEventListener("click", () => zoomCamera(-cameraZoomStep()));
 cameraPluginSelect.addEventListener("change", () => selectCameraPlugin().catch((err) => setCameraNote(normalizeError(err))));
 cameraPageBtn.addEventListener("click", () => openCameraPage().catch(() => {}));
-cameraClickDelay.addEventListener("change", handleCameraClickDelayChange);
+cameraRecordBtn.addEventListener("click", () => Promise.resolve(toggleCameraRecording()).catch((err) => setCameraNote(normalizeError(err))));
+cameraPowerBtn.addEventListener("click", () => Promise.resolve(toggleCameraPower()).catch((err) => setCameraNote(normalizeError(err))));
 cameraSpeed.addEventListener("input", handleCameraSpeedInput);
 cameraSpeed.addEventListener("change", handleCameraSpeedChange);
 // A slider that keeps the focus would take the arrow keys, which turn the camera.
 cameraSpeed.addEventListener("pointerup", () => cameraSpeed.blur());
+previewSourceSelect.addEventListener("change", () => handlePreviewSourceChange().catch((err) => showError(normalizeError(err))));
+cameraFormatBtn.addEventListener("click", () => formatCameraStorage().catch((err) => setCameraNote(normalizeError(err))));
 previewCaching.addEventListener("change", handlePreviewCachingChange);
 srtLatency.addEventListener("change", handleSrtLatencyChange);
 bufferApplyBtn.addEventListener("click", () => restartPreview().catch(() => {}));
@@ -3501,7 +4038,7 @@ window.addEventListener("keyup", handleKeyUp);
 window.addEventListener("focusin", (evt) => { if (isTypingTarget(evt)) stopCameraDrive(); });
 window.addEventListener("pointerdown", handleWindowPointerDown);
 panel.addEventListener("scroll", closePresetMenu);
-window.addEventListener("blur", () => { stopCameraDrive(); closePresetMenu(); });
+window.addEventListener("blur", () => { stopCameraDrive(); closePresetMenu(); clearVideoPointer(); });
 window.addEventListener("pagehide", stopCameraDrive);
 window.addEventListener("resize", closePresetMenu);
 

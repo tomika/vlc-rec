@@ -2,7 +2,7 @@
 
 The app can control the camera that produces the SRT stream: turn it by clicking the picture, zoom, and open the camera's own control page. The app knows nothing about any camera. It talks to an **adapter**, a small separate program written for one camera model (or one protocol: OSC, VISCA, HTTP, ...), through a fixed interface. Anyone can write an adapter for their own camera and drop it into a folder; the app does not change.
 
-**Status.** Interface version 1 is implemented: discovery by manifest, the JSON Lines protocol, the `hello`/`connect` handshake with capabilities, click to centre, continuous arrow-key drive with lease expiry and discrete turns, turning speed, relative zoom, absolute moves with presets 1 to 9 kept by the app, the camera's web page, and optional AI tracking with state polling and a visual indicator. The app draws only the controls that the capabilities declare. The first adapter is `plugins/osc/` (OBSBOT Tail 2 over its OSC interface). Sections marked **Planned** are the designed rest of the interface (focus, presets kept in the camera, image settings, actions such as formatting the SD card) and are not built; an adapter and the app ignore what they do not know, so they can be added without breaking version 1.
+**Status.** Interface version 1 implements manifest discovery, JSON Lines, capability negotiation, Center/Auto image actions, continuous drive with lease expiry, percentage turning speed, zoom, app presets, and optional AI tracking. Optional extensions provide browser preview, battery/storage telemetry, confirmed card formatting, camera-side recording and remote power controls. The app draws only declared capabilities. The public `plugins/osc/` adapter implements documented OSC operations; other adapters may implement more. Sections marked **Planned** cover remaining general focus, camera presets, image properties and arbitrary actions, without changing interface major version 1.
 
 ## Goals and non-goals
 
@@ -16,13 +16,13 @@ Goals
 
 Non-goals
 
-- Video. The stream still comes through the SRT and libVLC path. An adapter only controls the camera.
+- Recording transport. SRT recording stays on the existing player path. An optional adapter preview is an independent display source and never replaces the recording input.
 - Several cameras at once. One adapter and one camera; the protocol keeps room for a `camera` field later.
 - Auto-update, download or marketplace for adapters.
 
 ## Why a separate process
 
-The frontend runs in Neutralino. Its allow list is `app`, `os`, `filesystem`, and it has no socket API. Everything network-related already goes through `os.spawnProcess` (the native player, `ffprobe`, VLC). An adapter follows the same pattern:
+The frontend runs in Neutralino. Its native allow list covers app, process and filesystem APIs, not raw TCP/UDP. Device networking runs in a separately spawned adapter. A standard browser WebSocket to the adapter's loopback preview session carries video; it is separate from the native API allow list. An adapter follows this pattern:
 
 - It can use UDP, TCP, HTTP, USB or whatever the camera needs, in any language.
 - A crash or hang in an adapter cannot take the app down.
@@ -81,7 +81,7 @@ Adapters are never downloaded by the app. Installing one means copying a folder,
 {
   "camera_plugin": "osc",
   "camera_config": { "host": "192.168.1.50" },
-  "camera_turn_speed": 10,
+  "camera_turn_speed_percent": 25,
   "camera_zoom_step": 10,
   "camera_arrow_step_deg": 2,
   "camera_presets": { "1": { "pan": -20, "tilt": 5, "zoom": 0.5 } }
@@ -90,7 +90,7 @@ Adapters are never downloaded by the app. Installing one means copying a folder,
 
 - `camera_plugin`: the id of the adapter; empty (the default) selects the sole usable adapter automatically. When several are available, the settings offer a choice.
 - `camera_config`: what `connect` gets. Fields the manifest declares are taken from here, missing ones from the manifest's defaults. Edit the file for now (**Planned:** a form made from the manifest).
-- `camera_turn_speed`: the speed of a turn after a click, in the unit of `ptz.speed` (degrees per second). The slider changes it.
+- `camera_turn_speed_percent`: turn speed from 1 to 100; the app maps it to `ptz.speed`. Legacy `camera_turn_speed` settings migrate from the previous 1–90 scale when capabilities arrive.
 - `camera_zoom_step`: percent of the zoom range per button press; a wheel notch is half of that.
 - `camera_arrow_step_deg`: degrees per arrow key press.
 - `camera_presets`: the presets 1 to 9 that the app keeps, see [Presets](#presets).
@@ -123,14 +123,14 @@ Three kinds of message:
 | `busy` | Another operation is running, or a resource (a port) is in use. |
 | `timeout` | The camera did not answer in time. |
 | `device_error` | The camera reported a failure, or a command could not be sent. |
-| `confirmation_required` | **Planned:** a destructive action without `confirmed: true`. |
+| `confirmation_required` | A destructive action without `confirmed: true`. |
 | `internal` | Adapter bug. |
 
 ## Conventions
 
 - Pan and tilt in degrees. Positive pan is to the camera's right, positive tilt is up, 0, 0 is straight ahead. The adapter converts from the camera's own sign convention.
 - Zoom is normalized `0.0 .. 1.0`, wide to tele, of the range the camera really has. `zoom.by` takes a fraction of that range.
-- Speed is in the unit the adapter declares in `capabilities.ptz.speed` (the Tail 2 adapter: degrees per second, 1 to 90).
+- New adapters describe turn speed as `ptz.speed {min:0.01,max:1,default:0.25,unit:"normalized"}`. `ptz.setSpeed.value` then means a fraction of the usable turning speed, not a calibrated number of degrees per second. The app displays 1–100%. Legacy adapters advertising a different unit retain their original range; the app maps the percentage to that range.
 - Every property with a range is described in `capabilities`; the app takes no limits from anywhere else.
 
 ## Lifecycle
@@ -166,10 +166,10 @@ All of `ptz.*`, `zoom.*` and `ai.*` are optional: the adapter declares what it s
 | `ptz.centerOn` | `x`, `y` (0..1, origin top left of the visible picture), `aspect` (width / height) | `{}` | Turn the camera so that the clicked point ends up in the middle. Needs `ptz.centerOn`. See [Click to centre](#click-to-centre). Outcome in `event turned`. |
 | `ai.trackPerson` | `x`, `y` (0..1, origin top left) | `{}` | Request tracking of the person at the point. Needs `ai.trackPerson`. An asynchronous adapter may accept the request before target acquisition; success must not be presented as confirmed acquisition. |
 | `ai.get` | none | `{enabled: boolean}` | Read the camera's current tracking mode. Needs `ai.status`. |
-| `ai.stop` | none | `{}` | Turn off tracking. Needs `ai.stop`. Before applying a preset, the app waits until `ai.get` confirms tracking is off. |
+| `ai.stop` | none | `{}` | Turn off tracking. Needs `ai.stop`. Before applying a position preset, the app waits until `ai.get` confirms tracking is off. |
 | `ptz.nudge` | `pan`, `tilt` (degrees, right and up positive) | `{}` | A small turn by this much, meant for key repeat: it builds on the last target while that is recent, so it neither waits for a readout nor lets the readout jitter in. Needs `ptz.nudge`. Outcome in `event nudged`. |
 | `ptz.setSpeed` | `value` | `{}` | The speed of `ptz.centerOn`, in the unit and range of `ptz.speed`. The app sends its saved speed after `connect`. |
-| `ptz.get` | none | `{pan, tilt}` | Degrees. While a turn that was asked for is still running, the position it is going to, not the one on the way: a preset taught right after a click is the point of the click. Needs `ptz.absolute`. |
+| `ptz.get` | `actual?` (boolean) | `{pan, tilt}` | Degrees. By default an active turn reports its target, so a preset taught just after Center stores that target. `actual:true` requests measured feedback and requires `ptz.feedback`. Needs `ptz.absolute`. |
 | `zoom.by` | `delta` (-1..1) | `{}` | Zoom in (positive) or out by this fraction of the range, clamped to the range. Builds on the last target while a previous zoom is still running. Needs `zoom.by`. Outcome in `event zoom`. |
 | `zoom.get` | none | `{value}` | 0..1. While a zoom that was asked for is still running, the target. Needs `zoom.absolute`. |
 | `ptz.moveTo` | `pan`, `tilt` (degrees, right and up positive) | `{}` | An absolute turn at the speed of `ptz.centerOn` (`ptz.setSpeed`). Needs `ptz.absolute`, which also means that `ptz.get` works. Outcome in `event turned`. |
@@ -194,13 +194,20 @@ The result of `connect`, and re-sent as `event capabilities` when something chan
 |---|---|
 | `device.model`, `device.address` | Shown in the camera block of the drawer. |
 | `ptz.centerOn` | `"native"` (the camera does it) or `"estimated"` (computed from the optics): a click on the picture turns the camera. |
-| `ai.trackPerson` | Double-click a person to request tracking. The first click waits for the configured interval before centering; a later double-click does not issue a tracking request. |
-| `ai.status` and `ai.stop` | Poll actual tracking state, show a blue preview edge while enabled, and stop tracking on the next double-click or before applying a preset. |
+| `ai.trackPerson` | Left-double-click a person, or press A with the pointer over that person, to request tracking. |
+| `ai.status` and `ai.stop` | Poll actual tracking state, show a blue preview edge while enabled, and stop tracking on the next Auto action or before applying a preset that changes position. Zoom-only presets preserve tracking. |
 | `ptz.nudge` | Discrete arrow steps when continuous drive is unavailable. |
 | `ptz.continuous` | Hold arrow keys to drive; release stops. `{axes:"single",defaultSpeed:0.2}` declares a single axis and the default normalized velocity. |
 | `ptz.absolute` | `ptz.get` and `ptz.moveTo` work: position presets. |
+| `ptz.feedback` | `ptz.get {actual:true}` returns the measured position while moving. Without it, callers use the default target-preserving `ptz.get` contract. |
 | `zoom.absolute` | `zoom.get` and `zoom.set` work: zoom presets. |
-| `ptz.speed` | The turning speed slider, with `min` and `max`. |
+| `ptz.speed` | The 1–100% turning speed slider, mapped to the advertised `min`, `max` and `unit`. |
+| `preview.format` | Optional independent browser preview; currently `"hevc-annexb-v1"`. Enables the SRT / Camera preview selector. |
+| `telemetry.battery`, `telemetry.storage` | Optional battery/card readouts from `telemetry.get`; absent or stale values are unknown. |
+| `telemetry.recording`, `telemetry.power` | Optional camera recording and remote power state from `telemetry.get`. |
+| `storage.format` | Enables explicit SD-format confirmation and `storage.format {confirmed:true}`. |
+| `record.start`, `record.stop` | Enables independent camera-side recording controls. |
+| `power.on`, `power.off` | Enables explicit remote camera power controls; `mode:"remote"` describes the operation without promising standby or wake-on-LAN. |
 | `zoom.by` | The `-` and `+` buttons and the mouse wheel zoom the camera. |
 | `webPage.url` | The **Open web page** button opens it in the system's web browser (a plain `http` or `https` address only). |
 
@@ -227,16 +234,18 @@ Events report what happened, whoever asked for it. The response to a request onl
 
 The presets belong to the app, not to the camera. A preset is a position (pan and tilt, degrees) and/or a zoom (0..1 of the range), kept in `camera_presets` of the settings file, and applying one is an absolute move: `ptz.moveTo` and/or `zoom.set`. So every adapter that declares `ptz.absolute` and `zoom.absolute` (and answers `ptz.get` and `zoom.get` with where the camera is, or is going) gets nine presets without a memory in the camera.
 
+Applying a zoom-only preset calls `zoom.set` without calling `ai.stop` or changing AI mode. A preset containing position first stops tracking and waits for confirmation that it is off, then performs its position and optional zoom changes.
+
 - **Keys.** `1` to `9` apply the preset. `Alt+<number>` teaches it from the camera as it is now: position and zoom, as far as the camera can. `Alt+Shift+<number>` teaches the position only, so that applying it only turns. `Alt+Ctrl+<number>` teaches the zoom only, so that applying it only zooms. `Alt+Ctrl+Shift+<number>` deletes it. Teaching replaces the preset whole. The digit is taken from the physical key (`KeyboardEvent.code`, also the keypad), because with Alt+Ctrl (AltGr on many layouts) the character is not the digit. Keys typed into a field, and keys while a dialog is open, are not taken.
 - **Preset 0 is fixed.** It is the wide shot: pan and tilt 0, the camera straight ahead, and zoom 0, fully out. It is not in the settings and nothing teaches, changes or deletes it (`Alt+0` in any form says that it is fixed, and its menu has only Apply). It uses the same moves as the others, so a camera that can only turn or only zoom does what it can.
-- **Buttons.** Ten buttons, 1 to 9 and then 0 as on the keyboard, in a row. Gray: empty. Blue: a position. Amber: a zoom. Half blue and half amber: both. A click applies the preset; a right click opens a menu with Apply, Teach (position and zoom, position only, zoom only) and Delete, with the keys written next to them. The row is in the bar below the video when the window is at least 900 px wide; otherwise, and beside the video, it is in the drawer. The menu hides the video while it is open over it (a page cannot draw over the native video window).
+- **Buttons.** Ten buttons, 1 to 9 and then 0 as on the keyboard, in a row. Gray: empty. Blue: a position. Amber: a zoom. Half blue and half amber: both. A click applies the preset; a right click opens a menu with Apply, Teach (position and zoom, position only, zoom only) and Delete, with the keys written next to them. Full settings show the row in the drawer; compact mode uses the bar. During browser camera preview, both rows offer menus, which may overlay the video and remain within the viewport. During native SRT display, only the settings row offers a menu, bounded to the visible drawer so VLC stays visible. Switching back to SRT or falling back after a browser preview failure closes any HTML overlay before restoring the native video window.
 - **What is stored.** `{ "pan": -20, "tilt": 5, "zoom": 0.5 }`, or only the pan and tilt, or only the zoom. The presets belong to the camera in use: they are not tied to an address, so another camera needs its own. Sensible values only are read back (pan and tilt within 360 degrees, zoom 0..1).
 
 ## Click to centre
 
-The user clicks a point in the preview and the camera turns so that the point moves to the middle of the picture. The app only reports where the click was; how the camera turns is the adapter's business, so a camera that can do it natively wins over an estimate.
+The user right-clicks a point in the preview, or presses C while the pointer is over it, and the camera immediately turns so the point moves to the middle. A native left-button double-click or A requests/toggles automatic tracking there. A single left click has no camera action. Keyboard shortcuts ignore repeats, modifiers, editable controls, dialogs, and a pointer outside the visible picture or lost on blur. The app uses the operating system's native double-click detection for the left-button gesture; right-click centering has no delay. The app only reports picture coordinates; the adapter owns motion planning, including coordinated axis speeds and common arrival time.
 
-- **App side.** The video is a native child window of `vlc-rec-player` over `#videoHost`. The player switches libVLC mouse input off, and the window passes mouse and key input to the page (checked on X11 and on sway with XWayland in the `camera` e2e scenario; on Windows the child window is `WS_DISABLED` for the same effect, unverified). The page listens for `pointerdown` on `#videoHost`, converts the position to the visible picture (the aspect ratio is known from the player's `video` event; the box is already fitted to it, so there are no bars; top left is 0,0) and sends `ptz.centerOn {x, y, aspect}` when the camera declares it. A click in the middle, a click while a stream is not running, and a click while the previous turn has not finished are not sent.
+- **App side.** SRT video uses the native child window over `#videoHost`; the optional browser preview uses a canvas inside the same fitted host. The native player passes input to the page. Right mouse release handles Center immediately; the browser's native `dblclick` event on the left button handles Auto. C/A use the last valid pointer position. Coordinates are relative to the visible picture, top left 0,0, with the aspect supplied by the active renderer. The page sends `ptz.centerOn {x,y,aspect}` only when supported. A point in the middle, an idle stream, a dialog or a still-busy turn prevents centering.
 - **Native implementation.** If the camera can do it itself, the adapter passes the point on.
 - **Estimated implementation.** Otherwise the adapter computes the rotation from the optics, with the pinhole model. Let `u = 2x - 1` and `v = 1 - 2y` be the offsets from the centre in half-frame units, `t = tan(HFOV / 2) / zoom_ratio` the half-width tangent at the current zoom, and `aspect` = width / height:
 
@@ -248,7 +257,7 @@ The user clicks a point in the preview and the camera turns so that the point mo
   ```
 
   then it moves the camera to the target, clamped to the range in `capabilities`. The inputs are the current pan, tilt and zoom (read from the camera) and the horizontal field of view at zoom 0, which belongs to the camera model and is an adapter setting that the user can calibrate (`hfov`; `tools/camera/calibrate-fov.js` measures it from the camera's own picture).
-- **Limits of the estimate.** Lens distortion makes it less exact at the edges. The preview is behind the camera by the SRT latency, so a click while the camera is still moving refers to an older position; that is why the app waits for the end of a turn. An adapter may also refuse while the camera is moving or tracking something (answer `busy`). One more click corrects the remaining error.
+- **Limits of the estimate.** Lens distortion makes it less exact at the edges. Preview latency depends on the selected source; SRT buffering can make a click while the camera is moving refer to an older position. That is why the app waits for the end of a turn. An adapter may also refuse while the camera is moving or tracking something (answer `busy`). One more click corrects the remaining error.
 
 ## Writing an adapter
 
@@ -285,14 +294,57 @@ Try an adapter by hand: `echo '{"id":1,"method":"hello","params":{"interface":1}
 
 The camera code is in `src/frontend/app.js` (the app is one script, so there is no separate module): finding the adapter (`findPlugin`, `pluginCommand`), the request layer (`cameraRequest`, ids and timeouts), the handshake (`startCamera`, `connectCamera`), capability gating (`cameraCan`, `showCameraControls`, `showCameraPage`), and the controls (`turnCameraTo`, `zoomCamera`, `handleArrowKey`, the speed slider). The unit tests in `tests/reconnect.test.js` (`camera:`) play the adapter by reading the requests the app wrote and feeding answers back.
 
-- All camera calls fail soft. Errors go to a note after the status text, not into a modal. **Planned:** destructive actions always get a confirmation dialog.
+- Camera errors appear in a note after the status text. Storage formatting requires an explicit erase confirmation dialog before the app sends the request.
 - `nativeAllowList` already covers `os.*`, so no config change is needed.
 
 ## Continuous pan/tilt drive (implemented)
 
 `ptz.continuous` declares `ptz.move {pan, tilt, ttl_ms?}` and `ptz.stop {}`. Velocities are normalized -1..1, positive right/up. TTL defaults to 1000 ms; the OSC adapter accepts 200-2000 ms. `{axes:"single",defaultSpeed:0.2}` means that only one nonzero axis is accepted and gives the default keyboard velocity. The app uses the most recently pressed arrow and sends a heartbeat every TTL/3 after acknowledgement; release, focus loss, Scan and shutdown stop the drive. Shift multiplies velocity by five, capped at one. Adapters must stop autonomously on expiry, shutdown and EOF, including when stdin contains an incomplete line. Identical renewals must not resend the hardware start command.
 
-The OSC adapter maps velocity magnitude to the documented 1-100 direction speed, and stops with a single zero direction command. `camera_config.driveSpeed` defaults to 20 percent and supplies `defaultSpeed`. This is separate from the degree-per-second speed of absolute turns. Other device operations supersede and stop manual drive before blocking reads; AI status polling in the app pauses while a key is held.
+The OSC adapter maps velocity magnitude to the documented 1-100 direction speed, and stops with a single zero direction command. `camera_config.driveSpeed` defaults to 20 percent and supplies `defaultSpeed`. This is independent of the automatic-turn percentage slider; the adapter owns hardware speed units. Other device operations must preserve the drive watchdog during blocking reads; AI status polling in the app pauses while a key is held.
+
+An adapter may instead advertise `axes:"both"` and accept different nonzero pan/tilt velocities in one request. The app then combines held horizontal and vertical arrows, using the newest held direction on each axis. An autonomous `ptz.centerOn` / `ptz.moveTo` owns its own bounded motion deadline; its duration is independent of the manual drive lease. Telemetry and preview requests must not cancel motion or renew its lease. New motion, explicit stop, shutdown and EOF cancel obsolete commands so a delayed start cannot restart the motor after a stop.
+
+## Optional browser preview and telemetry (interface 1 extensions)
+
+These capability-gated additions keep interface major version 1. Older adapters need not implement them; unknown methods still return `unsupported`. Camera-specific transport and message layouts stay inside the adapter.
+
+| Method | Params | Result |
+|---|---|---|
+| `preview.open` | none | `{url,format:"hevc-annexb-v1",codec,width,height}` describing an adapter-owned loopback WebSocket session. |
+| `preview.close` | none | `{}`; closes the session and remote preview. Repeat calls are safe. |
+| `telemetry.get` | none | `{fresh,battery,storage,recording,power}`; example below. |
+| `storage.format` | `{confirmed:true}` | `{accepted:true}` when the device accepts formatting. Completion must be checked from later telemetry. |
+| `record.start`, `record.stop` | none | `{accepted:true}` when the camera accepts the command; camera recording telemetry confirms the resulting state. |
+| `power.set` | `{on:boolean}` | `{accepted:true}` when the camera accepts the remote power command; power telemetry confirms the resulting state. |
+
+`preview.open` returns a session-specific `ws://127.0.0.1:PORT/TOKEN` address (IPv6 loopback/localhost are also allowed by clients). The adapter binds only to loopback, protects each session with an unpredictable token and accepts local application origins. Device credentials and remote addresses are not exposed to the frontend. A new session invalidates the previous one; closing the adapter or stdin closes all sessions. No video is encoded into JSON Lines on stdout.
+
+`hevc-annexb-v1` sends two consecutive WebSocket messages for each picture:
+
+```json
+{"type":"frame","timestamp":123456789,"key":true,"tracking":{"x":0.2,"y":0.1,"width":0.3,"height":0.6}}
+```
+
+The following binary message contains that picture's HEVC Annex B access unit, including parameter sets at stream start/keyframes as needed by the decoder. `timestamp` is a nonnegative safe integer in microseconds; `key` indicates a random access picture. `tracking` is a normalized, top-left-origin box or `null`. The box belongs only to that picture; missing/invalid targets clear it. All units and framing are camera-neutral. Errors may be sent as `{type:"error",message}` before the session closes. Messages are bounded to 8 MiB. Clients wait for a keyframe, bound decoder queues, and resume at a keyframe after dropping dependent pictures.
+
+The frontend uses WebCodecs where a working HEVC configuration is available, otherwise a browser worker with a self-contained WASM decoder. Video and target boxes are rendered together on canvas. Selecting a source while idle starts preview, and changing source during preview restarts preview using the newly selected picture. During local SRT recording, selecting Camera hides its native video window and opens the camera display; selecting SRT closes that display and restores the SRT picture. These recording-time display switches preserve the same player and recording file. A failed camera preview falls back to SRT and reports the reason without changing the saved source preference.
+
+Example telemetry, polled around `telemetry.pollMs` (default 1000 ms):
+
+```json
+{"fresh":true,"battery":{"present":true,"level":0.88,"charging":false},"storage":{"status":"ready","format":"exfat","totalBytes":127844614144,"freeBytes":74698326016,"remainingSeconds":11951,"formatting":null,"formatCompleted":false},"recording":false,"power":{"on":true}}
+```
+
+Battery level is 0–1. Storage sizes are bytes, remaining time is seconds, and status is `absent`, `preparing`, `ready`, `full`, `unsupported`, `error`, `initializing`, `readonly`, `unformatted` or `unknown`. Missing blocks and unknown recording state are `null`; unknown state never authorizes formatting. `fresh:false` means cached device data is no longer trustworthy: clients clear numerical readouts and disable destructive actions. Preview frame boxes are independent of this lower-frequency telemetry.
+
+The app confirms formatting with explicit erase/cancel choices and passes `confirmed:true` only after approval. The adapter independently rejects missing confirmation, stale/unknown storage or recording status, active camera recording, absent/busy cards and service failures. `accepted:true` is not evidence that formatting completed. `storage.formatting` is `true` after the adapter has observed the card enter its formatting phase, `false` only after that operation reaches a terminal state, and otherwise `null`; `formatCompleted` and `formatFailed` are operation scoped signals for confirmed success or failure. The adapter clears these signals for each newly accepted format operation. A free-space change alone, or `formatting:false` without a previously observed formatting phase, never proves completion. The UI waits for request acceptance and a positive completion transition, reports completion/failure/timeout in the visible camera status and drawer, and reports when connection loss prevents confirmation. Generic `actions.invoke` remains a planned extension for arbitrary vendor actions; this implemented method is the fixed storage operation.
+
+Storage state and format results remain available when capacity fields are unknown (`null`), for example after card removal. Telemetry reads begun before the current format request cannot confirm that operation's completion.
+
+Camera-side recording is independent of the app's SRT recording. The optional `record` capability block declares `start` and `stop`; `record.start` and `record.stop` change only camera recording. The UI uses one button labelled Start or Stop according to fresh confirmed recording state, and waits for later telemetry before changing to the opposite action. The power control likewise uses one button labelled Power camera on or off, with power-on as the recovery action when state is unknown. Pending operations display progress on the same button. When the adapter advertises `telemetry.recording`, telemetry includes `recording:boolean|null`.
+
+The optional `power` capability block declares `on`, `off` and `mode:"remote"`. `power.set {on:true|false}` requests the camera's remote power transition; it does not promise standby, wake-on-LAN or any particular network availability. When `telemetry.power` is declared, telemetry includes `power:{on:boolean}|null`. The UI offers power-on as a recovery action when power state is unknown, but requires fresh known-on power and fresh known-off camera-recording state before power-off. Stop camera-side recording before powering off. Powering off during local SRT recording asks for explicit confirmation because the camera may supply that stream. Adapters must treat an accepted command as pending until telemetry confirms the new state.
 
 ## Planned: the rest of the interface
 

@@ -61,6 +61,47 @@ const E2E_SCENARIO = "__SCENARIO__";
 
   const overlaps = (a, b) => a.left < b.right - 0.5 && b.left < a.right - 0.5 && a.top < b.bottom - 0.5 && b.top < a.bottom - 0.5;
 
+  async function previewSourceLayoutChecks(label) {
+    if (panelToggle.getAttribute("aria-expanded") !== "true") click(panelToggle);
+    await waitFor(`${label}: full settings drawer open`, () => panelToggle.getAttribute("aria-expanded") === "true" && !layoutEl.classList.contains("is-compact"));
+    const item = document.getElementById("previewSourceItem");
+    const select = document.getElementById("previewSource");
+    const previewSettings = document.querySelector(".preview-settings");
+    const bufferInput = document.getElementById("previewCaching");
+    const latencyInput = document.getElementById("srtLatency");
+    const units = [...document.querySelectorAll(".preview-control-unit")];
+    const itemRect = item.getBoundingClientRect();
+    const selectRect = select.getBoundingClientRect();
+    const settingsRect = previewSettings.getBoundingClientRect();
+    const bufferRect = bufferInput.getBoundingClientRect();
+    const latencyRect = latencyInput.getBoundingClientRect();
+    check(`${label}: preview source reaches drawer content edge`, !item.hidden && selectRect.width > 0 && Math.abs(selectRect.right - settingsRect.right) <= 1.5,
+      `select right=${selectRect.right.toFixed(1)}, settings right=${settingsRect.right.toFixed(1)}`);
+    check(`${label}: preview inputs share a left edge`, Math.abs(selectRect.left - bufferRect.left) <= 1.5 && Math.abs(bufferRect.left - latencyRect.left) <= 1.5,
+      `source=${selectRect.left.toFixed(1)}, buffer=${bufferRect.left.toFixed(1)}, latency=${latencyRect.left.toFixed(1)}`);
+    check(`${label}: numeric preview inputs and units fit their rows`, bufferRect.width > 0 && latencyRect.width > 0 &&
+      bufferRect.right <= settingsRect.right + 1 && latencyRect.right <= settingsRect.right + 1 && units.length === 2 &&
+      Math.abs(units[0].getBoundingClientRect().left - units[1].getBoundingClientRect().left) <= 1.5,
+      `buffer right=${bufferRect.right.toFixed(1)}, latency right=${latencyRect.right.toFixed(1)}, settings right=${settingsRect.right.toFixed(1)}`);
+    const reconnectText = document.querySelector(".reconnect-option span");
+    const reconnectRect = reconnectText.getBoundingClientRect();
+    check(`${label}: reconnect checkbox text wraps inside the preview panel`, reconnectText.scrollWidth <= reconnectText.clientWidth + 1 &&
+      reconnectRect.left >= settingsRect.left - 1 && reconnectRect.right <= settingsRect.right + 1,
+      `text right=${reconnectRect.right.toFixed(1)}, settings right=${settingsRect.right.toFixed(1)}`);
+
+    const actionRow = document.querySelector(".camera-action-row");
+    const buttons = [...(actionRow?.querySelectorAll("button") || [])].filter((button) => !button.hidden);
+    const expected = [document.getElementById("cameraRecordBtn"), document.getElementById("cameraPowerBtn")];
+    check(`${label}: exactly two camera action toggles are shown`, buttons.length === 2 && expected.every((button) => buttons.includes(button)),
+      buttons.map((button) => button.id).join(", "));
+    if (buttons.length === 2) {
+      const [first, second] = buttons.map((button) => button.getBoundingClientRect());
+      const row = actionRow.getBoundingClientRect();
+      check(`${label}: camera action toggles fit without overlap`, !overlaps(first, second) &&
+        [first, second].every((box) => box.width > 0 && box.left >= row.left - 1 && box.right <= row.right + 1));
+    }
+  }
+
   // Geometry the screenshot cannot show: aspect ratio, a maximal video box, no overlap, nothing cut off.
   function layoutChecks(label) {
     const host = videoHost.getBoundingClientRect();
@@ -244,32 +285,203 @@ const E2E_SCENARIO = "__SCENARIO__";
           { click: 1, wait: 80 }, { click: 1, wait: 800 }
         ] });
       };
+      const r = videoHost.getBoundingClientRect();
+      await step("input-ai-left-single", { action: "input", steps: [
+        { move: [Math.round(r.left + r.width / 2), Math.round(r.top + r.height / 2)], wait: 100 },
+        { click: 1, wait: 800 }
+      ] });
+      check("camera: a left single click leaves Auto off", cameraProc.aiEnabled === false);
       await doubleClick();
       await waitFor("camera: polled tracking on", () => cameraProc.aiEnabled === true);
       await shot("camera-ai-border", "ai-border", 500);
       await doubleClick();
       await waitFor("camera: polled tracking off", () => cameraProc.aiEnabled === false);
       check("camera: AI border removed", !videoHost.classList.contains("ai-tracking"));
+      const rightClick = async (twice = false) => {
+        const r = videoHost.getBoundingClientRect();
+        await step(`input-ai-right-${twice ? "double" : "single"}`, { action: "input", steps: [
+          { move: [Math.round(r.left + r.width * 0.75), Math.round(r.top + r.height / 2)], wait: 100 },
+          { click: 3, wait: twice ? 80 : 800 }, ...(twice ? [{ click: 3, wait: 800 }] : [])
+        ] });
+      };
+      await rightClick();
+      check("camera: a right single click does not toggle Auto", cameraProc.aiEnabled === false);
+      await rightClick(true);
+      check("camera: a right double click does not toggle Auto", cameraProc.aiEnabled === false);
+      const keyboardAuto = async (count) => {
+        const r = videoHost.getBoundingClientRect();
+        await step(`input-ai-key-${count}`, { action: "input", steps: [
+          { move: [Math.round(r.left + r.width * 0.75), Math.round(r.top + r.height / 2)], wait: 100 },
+          { key: "a", wait: 800 }
+        ] });
+      };
+      await keyboardAuto("on");
+      await waitFor("camera: A key starts Auto at the pointer", () => cameraProc.aiEnabled === true);
+      await keyboardAuto("off");
+      await waitFor("camera: A key stops Auto at the pointer", () => cameraProc.aiEnabled === false);
       await stopAndWait("AI test stop");
       await finish();
       await Neutralino.app.exit();
       return;
     }
 
+    if (E2E_SCENARIO === "browser-preview") {
+      await setWindow(1120, 630);
+      await waitFor("camera preview fixture connected", () => cameraPreviewAvailable() && cameraTelemetryValue?.fresh === true);
+      await previewSourceLayoutChecks("wide layout");
+      await shot("preview-form-wide", "any");
+      await setWindow(680, 900);
+      await previewSourceLayoutChecks("narrow layout");
+      await shot("preview-form-narrow", "any");
+      await setWindow(1120, 630);
+      check("camera toggles: initial actions match the confirmed state", cameraRecordBtn.textContent === "Start camera recording" && cameraPowerBtn.textContent === "Power camera off");
+      click(cameraRecordBtn);
+      await waitFor("camera toggles: recording button becomes Stop", () => cameraRecordBtn.textContent === "Stop camera recording" && !cameraRecordBtn.disabled);
+      click(cameraRecordBtn);
+      await waitFor("camera toggles: recording button becomes Start", () => cameraRecordBtn.textContent === "Start camera recording" && !cameraRecordBtn.disabled);
+      click(cameraPowerBtn);
+      await waitFor("camera toggles: power button becomes On", () => cameraPowerBtn.textContent === "Power camera on" && !cameraPowerBtn.disabled);
+      click(cameraPowerBtn);
+      await waitFor("camera toggles: power button becomes Off", () => cameraPowerBtn.textContent === "Power camera off" && !cameraPowerBtn.disabled);
+      check("camera preview fixture: battery telemetry rendered", /75%/.test(cameraBattery.textContent), cameraBattery.textContent);
+      check("camera preview fixture: storage telemetry rendered", /SD:.*ready/.test(cameraStorage.textContent), cameraStorage.textContent);
+      check("camera preview fixture: camera recording is off", /recording: off/i.test(cameraRecording.textContent), cameraRecording.textContent);
+      await configure("browser-preview", "mkv", folder);
+      const selectSource = async (source, name) => {
+        previewSourceSelect.value = source;
+        previewSourceSelect.dispatchEvent(new Event("change"));
+        return waitFor(name, () => previewSourceSelect.value === source);
+      };
+      await selectSource("camera", "browser preview: Camera selected while idle");
+      await waitFor("browser preview: idle Camera selection starts preview", () => mode === "preview" && hasStats(), 30000);
+      await waitFor("browser preview: idle Camera selection displays a decoded frame", () => !cameraPreviewCanvas.hidden && browserPreview?.client?.hasFrame === true, 30000);
+      const cameraPreviewPlayer = currentProcess?.id;
+      await selectSource("srt", "browser preview: SRT selected during preview");
+      await waitFor("browser preview: SRT selection restarts preview", () => mode === "preview" && hasStats() && currentProcess?.id && currentProcess.id !== cameraPreviewPlayer, 30000);
+      await waitFor("browser preview: SRT selection hides camera canvas", () => cameraPreviewCanvas.hidden && !browserPreview);
+      click(recordBtn);
+      await waitFor("browser preview: SRT recording started", () => mode === "recording" && hasStats() && outputFile === `${folder}/browser-preview.mkv`);
+      const recordedPlayer = currentProcess.id;
+      const recordedFile = outputFile;
+      const sizeOfRecording = async () => (await Neutralino.filesystem.getStats(recordedFile).catch(() => ({ size: 0 }))).size;
+      await waitFor("browser preview: SRT recording file grows", async () => (await sizeOfRecording()) > 0);
+      const recordingContinues = async (label, previousSize) => {
+        await waitFor(`${label}: recording file keeps growing`, async () => (await sizeOfRecording()) > previousSize);
+        check(`${label}: same recording player and file`, mode === "recording" && currentProcess?.id === recordedPlayer && outputFile === recordedFile,
+          `mode=${mode}, pid=${currentProcess?.id}, file=${outputFile}`);
+      };
+
+      let previousSize = await sizeOfRecording();
+      await selectSource("camera", "browser preview: Camera source selected");
+      await waitFor("browser preview: decoded camera frame displayed", () => !cameraPreviewCanvas.hidden && browserPreview?.client?.hasFrame === true, 30000);
+      const pixels = cameraPreviewCanvas.getContext("2d").getImageData(24, 16, 1, 1).data;
+      check("browser preview: decoder rendered the green tracking corner", pixels[1] > 200 && pixels[0] < 100,
+        `RGBA ${Array.from(pixels).join(",")}`);
+      check("browser preview: preview never replaced the SRT recording", mode === "recording" && currentProcess?.id === recordedPlayer && outputFile === recordedFile);
+      await recordingContinues("camera display", previousSize);
+
+      previousSize = await sizeOfRecording();
+      await selectSource("srt", "browser preview: returned to SRT source");
+      await waitFor("browser preview: camera canvas hidden on SRT", () => cameraPreviewCanvas.hidden && !browserPreview);
+      await recordingContinues("SRT display", previousSize);
+
+      previousSize = await sizeOfRecording();
+      await selectSource("camera", "browser preview: Camera selected again");
+      await waitFor("browser preview: second decoded frame displayed", () => !cameraPreviewCanvas.hidden && browserPreview?.client?.hasFrame === true, 30000);
+      await recordingContinues("second camera display", previousSize);
+
+      // The compact preset bar may open its menu over the browser video while that preview is active.
+      panelOverride = "compact";
+      updateLayout(true);
+      await waitFor("browser preview presets: compact panel selected", () => layoutEl.classList.contains("is-compact"));
+      parameters.camera_presets = { 1: { zoom: 0.75 } };
+      renderPresets();
+      const previewPresetButton = presetBar.children[0];
+      const previewPresetButtonBox = previewPresetButton.getBoundingClientRect();
+      previewPresetButton.dispatchEvent(new MouseEvent("contextmenu", {
+        bubbles: true,
+        cancelable: true,
+        clientX: previewPresetButtonBox.left + previewPresetButtonBox.width / 2,
+        clientY: previewPresetButtonBox.top + previewPresetButtonBox.height / 2
+      }));
+      await waitFor("browser preview presets: compact bar opens its menu", () => !presetMenu.hidden);
+      const previewMenuBox = presetMenu.getBoundingClientRect();
+      const previewVideoBox = cameraPreviewCanvas.getBoundingClientRect();
+      check("browser preview presets: menu is clamped to the viewport", previewMenuBox.left >= 0 && previewMenuBox.top >= 0 &&
+        previewMenuBox.right <= innerWidth + 0.5 && previewMenuBox.bottom <= innerHeight + 0.5,
+        `${Math.round(previewMenuBox.left)},${Math.round(previewMenuBox.top)} ${Math.round(previewMenuBox.width)}x${Math.round(previewMenuBox.height)} in ${innerWidth}x${innerHeight}`);
+      check("browser preview presets: menu overlays the HTML camera video", overlaps(previewMenuBox, previewVideoBox),
+        `menu=${Math.round(previewMenuBox.left)},${Math.round(previewMenuBox.top)} ${Math.round(previewMenuBox.width)}x${Math.round(previewMenuBox.height)}; video=${Math.round(previewVideoBox.left)},${Math.round(previewVideoBox.top)} ${Math.round(previewVideoBox.width)}x${Math.round(previewVideoBox.height)}`);
+      await shot("browser-preview-preset-menu", "any", 300);
+      const applyPreviewPreset = presetMenu.querySelector('button[role="menuitem"]');
+      click(applyPreviewPreset);
+      const zoomAfterPreset = await cameraRequest(cameraProc, "zoom.get");
+      check("browser preview presets: Apply sent the stored zoom", zoomAfterPreset.value === 0.75, JSON.stringify(zoomAfterPreset));
+      check("browser preview presets: applying closes the menu", presetMenu.hidden);
+
+      const presetBeforeSourceSwitch = presetBar.children[0];
+      presetBeforeSourceSwitch.dispatchEvent(new MouseEvent("contextmenu", { bubbles: true, cancelable: true }));
+      await waitFor("browser preview presets: menu reopened before source switch", () => !presetMenu.hidden);
+      previousSize = await sizeOfRecording();
+      await selectSource("srt", "browser preview presets: switched back to SRT");
+      await waitFor("browser preview presets: menu closed before SRT display restored", () => presetMenu.hidden && cameraPreviewCanvas.hidden && !browserPreview);
+      const srtPresetButton = presetBar.children[0];
+      const srtPresetButtonBox = srtPresetButton.getBoundingClientRect();
+      srtPresetButton.dispatchEvent(new MouseEvent("contextmenu", {
+        bubbles: true,
+        cancelable: true,
+        clientX: srtPresetButtonBox.left + srtPresetButtonBox.width / 2,
+        clientY: srtPresetButtonBox.top + srtPresetButtonBox.height / 2
+      }));
+      await sleep(300);
+      check("browser preview presets: compact bar context menu stays unavailable on SRT", presetMenu.hidden);
+      await recordingContinues("SRT display after browser preset", previousSize);
+      await stopAndWait("browser preview recording stop");
+      await verifyFile("browser-preview.mkv", recordedFile);
+      const numbered = await Neutralino.filesystem.getStats(`${folder}/browser-preview_001.mkv`).then(() => true, () => false);
+      check("browser preview: source switching created no recording segment", !numbered);
+      check("browser preview: recording ended independently", mode === "idle" && !currentProcess);
+      await finish();
+      await Neutralino.app.exit();
+      return;
+    }
+
     if (E2E_SCENARIO === "camera") {
-      // run-e2e.js starts a fake OSC camera and writes its address into the settings file, so
+      // run-e2e.js starts a camera simulator and writes its address into the settings file, so
       // init() has started the camera adapter. Mouse and keys come through the X server, as a
       // user's would: over the real native video window.
       await setWindow(1120, 630);
       await waitFor("camera: adapter connected", () => cameraCan("zoom"));
       check("camera: controls shown", cameraBar.hidden === false);
+      check("camera: turning speed is a percentage", cameraSpeed.min === "1" && cameraSpeed.max === "100" && /%$/.test(cameraSpeedValue.textContent),
+        `${cameraSpeed.min}..${cameraSpeed.max}, ${cameraSpeedValue.textContent}`);
       await configure("camera", "mkv", folder);
       click(previewBtn);
       await waitFor("camera: preview running", () => mode === "preview" && hasStats());
       await sleep(2500); // The picture and the window settle.
       const host = videoHost.getBoundingClientRect();
       const at = (fx, fy) => [Math.round(host.left + host.width * fx), Math.round(host.top + host.height * fy)];
-      await step("input-click", { action: "input", steps: [{ move: at(0.75, 0.5), wait: 300 }, { click: 1, wait: 800 }] });
+      const state = async (name) => step(name, { action: "camera-state" });
+      const beforeLeft = await state("camera-before-left-click");
+      await step("input-left-click", { action: "input", steps: [{ move: at(0.75, 0.5), wait: 300 }, { click: 1, wait: 800 }] });
+      const afterLeft = await state("camera-after-left-click");
+      check("camera: left click causes no camera motion", afterLeft.turns.length === beforeLeft.turns.length && afterLeft.zooms.length === beforeLeft.zooms.length,
+        `turns ${beforeLeft.turns.length} -> ${afterLeft.turns.length}; zooms ${beforeLeft.zooms.length} -> ${afterLeft.zooms.length}`);
+      check("camera: adapter does not advertise Auto", !cameraCan("trackPerson"));
+      await step("input-key-a-no-auto", { action: "input", steps: [{ move: at(0.75, 0.5), wait: 100 }, { key: "a", wait: 500 }] });
+      const afterA = await state("camera-after-key-a");
+      check("camera: A is a no-op without Auto support", afterA.turns.length === beforeLeft.turns.length && afterA.zooms.length === beforeLeft.zooms.length);
+      const beforeRight = await state("camera-before-right-center");
+      await step("input-right-center", { action: "input", steps: [{ move: at(0.75, 0.5), wait: 200 }, { click: 3, wait: 400 }] });
+      const afterRight = await state("camera-after-right-center");
+      check("camera: a right single click centers immediately", afterRight.turns.length === beforeRight.turns.length + 1,
+        `turns ${beforeRight.turns.length} -> ${afterRight.turns.length}`);
+      await waitFor("camera: right-click turn has settled before the keyboard test", () => Date.now() >= cameraBusyUntil);
+      const beforeC = await state("camera-before-key-c");
+      await step("input-key-c-center", { action: "input", steps: [{ move: at(0.25, 0.5), wait: 200 }, { key: "c", wait: 1800 }] });
+      const afterC = await state("camera-after-key-c");
+      check("camera: C centers at the current pointer position", afterC.turns.length === beforeC.turns.length + 1,
+        `turns ${beforeC.turns.length} -> ${afterC.turns.length}`);
       await step("input-wheel", { action: "input", steps: [{ move: at(0.5, 0.5), wait: 200 }, { wheel: "up", wait: 400 }] });
       await step("input-keys", { action: "input", steps: [{ keydown: "Right", wait: 700 }, { keyup: "Right", wait: 200 }, { keydown: "Up", wait: 700 }, { keyup: "Up", wait: 200 }] });
       const reply = await step("camera-verify", { action: "camera-verify" });
