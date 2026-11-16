@@ -2945,6 +2945,28 @@ test("camera: rejected and failed formatting release the modal and leave the err
   }
 });
 
+test("camera: losing format or telemetry capabilities releases the wait dialog and ignores a late acknowledgement", async () => {
+  for (const replacement of [
+    { ...FULL_CAPS, telemetry:{storage:true} },
+    { ...FULL_CAPS, storage:{format:true} }
+  ]) {
+    const h = cameraHarness();
+    await connectCamera(h, { ...FULL_CAPS, telemetry:{storage:true}, storage:{format:true} });
+    await cameraAnswers(h,"telemetry.get",{result:{fresh:true,recording:false,storage:{status:"ready",totalBytes:4096,freeBytes:2048}}});
+    h.os.showMessageBox=async()=>"YES";
+    h.run("globalThis.formatPromise=formatCameraStorage()"); await flush();
+    assert.equal(h.elements.get("formatWaitDialog").hidden,false);
+    cameraSays(h,{event:"capabilities",capabilities:replacement});
+    assert.equal(h.run("cameraFormatting"),false,"lost capabilities cannot leave an unobservable operation locking the app");
+    assert.equal(h.elements.get("formatWaitDialog").hidden,true);
+    assert.equal(h.elements.get("layout").inert,false);
+    const message=h.elements.get("cameraStorageStatus").textContent;
+    assert.match(message,/completion could not be confirmed/);
+    await cameraAnswers(h,"storage.format",{result:{accepted:true}}); await h.run("formatPromise");
+    assert.equal(h.elements.get("cameraStorageStatus").textContent,message,"the late ACK cannot reopen or overwrite the result");
+  }
+});
+
 test("camera: format blocks record start and power off until its result", async () => {
   const h = cameraHarness();
   const caps = { ...FULL_CAPS, record:{start:true,stop:true}, power:{on:true,off:true,mode:"remote"},

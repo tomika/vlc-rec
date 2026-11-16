@@ -1640,6 +1640,8 @@ async function connectCamera(proc) {
 function applyCameraCapabilities(proc, caps) {
   stopCameraDrive();
   proc.caps = caps && typeof caps === "object" ? caps : {};
+  // A capability update can stop telemetry polling, including its format timeout.
+  if (cameraFormatting && (!proc.caps.telemetry || !proc.caps.storage?.format)) finishCameraFormatting(proc, null);
   migrateLegacyCameraSpeed();
   showCameraControls();
   if (cameraCan("trackStatus")) refreshCameraAiState(proc);
